@@ -1,6 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { getVisibleTileData } from "@/lib/map/tilemap";
+import { getTile } from "@/lib/map/tileset";
+import { getVisibleObjects, getCollidableObjects } from "@/lib/world/worldObjects";
+import { checkUserObjectCollision } from "@/lib/world/WorldObject";
 
 interface User {
   userId: string;
@@ -20,15 +24,28 @@ export default function Home() {
   const [currentColor, setCurrentColor] = useState<string>("");
   const [position, setPosition] = useState({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
   const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
-  const [viewportSize, setViewportSize] = useState({ width: typeof window !== 'undefined' ? window.innerWidth : 1200, height: typeof window !== 'undefined' ? window.innerHeight : 800 });
+  // Initialize with default values to avoid hydration mismatch
+  const [viewportSize, setViewportSize] = useState({ width: 1200, height: 800 });
+  const [isClient, setIsClient] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const positionRef = useRef({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
   const keysPressedRef = useRef<Set<string>>(new Set());
   const animationFrameRef = useRef<number | null>(null);
-  const lastUpdateTimeRef = useRef<number>(Date.now());
+  const lastUpdateTimeRef = useRef<number>(0); // Reset to 0 to ensure first update
+  const lastStateUpdateTimeRef = useRef<number>(0); // Separate timer for state updates
   const currentUserIdRef = useRef<string | null>(null);
+  const usersRef = useRef<Map<string, User>>(new Map());
+
+  // Set client-side flag and initialize viewport size after mount
+  useEffect(() => {
+    setIsClient(true);
+    setViewportSize({ width: window.innerWidth, height: window.innerHeight });
+  }, []);
 
   useEffect(() => {
+    // Only connect to WebSocket on client side
+    if (!isClient) return;
+    
     // Connect to WebSocket server
     const ws = new WebSocket("ws://localhost:8080");
     wsRef.current = ws;
@@ -50,15 +67,7 @@ export default function Home() {
         setCurrentColor(message.color);
         positionRef.current = pos;
         setPosition(pos);
-        // Update camera immediately
-        setViewportSize((prevSize) => {
-          let cameraX = pos.x - prevSize.width / 2;
-          let cameraY = pos.y - prevSize.height / 2;
-          cameraX = Math.max(0, Math.min(cameraX, MAP_WIDTH - prevSize.width));
-          cameraY = Math.max(0, Math.min(cameraY, MAP_HEIGHT - prevSize.height));
-          setCameraOffset({ x: cameraX, y: cameraY });
-          return prevSize;
-        });
+        // Camera will update automatically via useEffect when position state updates
       } else if (message.type === "userJoined") {
         // Add other users - safety check to never add ourselves
         const myUserId = currentUserIdRef.current;
@@ -132,7 +141,7 @@ export default function Home() {
     return () => {
       ws.close();
     };
-  }, []);
+  }, [isClient]);
 
   const sendPosition = useCallback((x: number, y: number) => {
     const myUserId = currentUserIdRef.current;
@@ -149,11 +158,18 @@ export default function Home() {
     }
   }, []);
 
-  // Check collision with other users
+  // Keep usersRef in sync with users state
+  useEffect(() => {
+    usersRef.current = users;
+  }, [users]);
+
+  // Check collision with other users AND world objects
+
   const checkCollision = useCallback((newX: number, newY: number): boolean => {
-    const allUsers = Array.from(users.values());
-    const myUserId = currentUserIdRef.current; // Use ref for current user ID
+    const myUserId = currentUserIdRef.current;
     
+    // Check collision with other users (use ref to get latest without dependency)
+    const allUsers = Array.from(usersRef.current.values());
     for (const user of allUsers) {
       // Skip collision check with ourselves
       if (user.userId === myUserId) continue;
@@ -163,36 +179,38 @@ export default function Home() {
       const distance = Math.sqrt(dx * dx + dy * dy);
       
       if (distance < COLLISION_DISTANCE) {
-        return true; // Collision detected
+        return true; // Collision detected with another user
       }
     }
+    
+    // Check collision with world objects (static, no dependency needed)
+    const collidableObjects = getCollidableObjects();
+    
+    for (const obj of collidableObjects) {
+      if (checkUserObjectCollision(newX, newY, USER_RADIUS, obj)) {
+        return true; // Collision detected with world object
+      }
+    }
+    
     return false;
-  }, [users]);
+  }, []); // No dependencies - uses refs and static functions
 
-  // Update camera position to follow LOCAL user only
-  const updateCamera = useCallback((userX: number, userY: number) => {
-    // Use current viewport size from state
+  // Camera follows LOCAL user position - updates whenever local position or viewport changes
+  useEffect(() => {
+    if (!currentUserId || !isClient) return;
+    
+    // Calculate camera position directly without separate callback to avoid dependency issues
     const width = viewportSize.width;
     const height = viewportSize.height;
-    
-    // Center camera on LOCAL user
-    let cameraX = userX - width / 2;
-    let cameraY = userY - height / 2;
+    let cameraX = position.x - width / 2;
+    let cameraY = position.y - height / 2;
 
     // Clamp camera at map edges
     cameraX = Math.max(0, Math.min(cameraX, MAP_WIDTH - width));
     cameraY = Math.max(0, Math.min(cameraY, MAP_HEIGHT - height));
 
     setCameraOffset({ x: cameraX, y: cameraY });
-  }, [viewportSize]);
-
-  // Camera follows LOCAL user position - updates whenever local position changes
-  useEffect(() => {
-    if (!currentUserId) return;
-    
-    // Update camera to follow local user's position
-    updateCamera(position.x, position.y);
-  }, [position, currentUserId, updateCamera]);
+  }, [position.x, position.y, viewportSize.width, viewportSize.height, currentUserId, isClient]);
 
   // Handle window resize
   useEffect(() => {
@@ -214,7 +232,7 @@ export default function Home() {
 
   // Smooth movement with animation frame
   useEffect(() => {
-    if (!currentUserId) return;
+    if (!currentUserId || !isClient) return;
 
     const moveUser = () => {
       const keys = keysPressedRef.current;
@@ -249,18 +267,21 @@ export default function Home() {
         
         if (!hasCollision) {
           positionRef.current = { x: newX, y: newY };
-          setPosition({ x: newX, y: newY }); // This will trigger camera update via useEffect
-          console.log("[MOVE_USER] Updated local position for userId:", myUserId, "to", { x: newX, y: newY });
+          
+          const now = Date.now();
+          
+          // Throttle position state updates to avoid excessive re-renders
+          // Only update state every ~16ms (~60fps) to reduce camera update frequency
+          if (now - lastStateUpdateTimeRef.current > 16) {
+            setPosition({ x: newX, y: newY }); // This will trigger camera update via useEffect
+            lastStateUpdateTimeRef.current = now;
+          }
           
           // Throttle position updates to server (every ~50ms)
-          const now = Date.now();
           if (now - lastUpdateTimeRef.current > 50) {
-            console.log("[MOVE_USER] Sending position to server");
             sendPosition(newX, newY);
             lastUpdateTimeRef.current = now;
           }
-        } else {
-          console.log("[MOVE_USER] Movement blocked due to collision");
         }
       }
 
@@ -274,7 +295,7 @@ export default function Home() {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [currentUserId, checkCollision, sendPosition, viewportSize]);
+  }, [currentUserId, isClient, checkCollision, sendPosition]);
 
   // Handle keyboard input
   useEffect(() => {
@@ -300,6 +321,30 @@ export default function Home() {
     };
   }, []);
 
+  // Calculate visible tiles for rendering (memoized for performance)
+  // Only calculate if client-side to avoid hydration issues
+  const visibleTiles = useMemo(() => {
+    if (!isClient) return [];
+    return getVisibleTileData(
+      cameraOffset.x,
+      cameraOffset.y,
+      viewportSize.width,
+      viewportSize.height
+    );
+  }, [cameraOffset.x, cameraOffset.y, viewportSize.width, viewportSize.height, isClient]);
+
+  // Calculate visible world objects for rendering (memoized for performance)
+  // Only calculate if client-side to avoid hydration issues
+  const visibleObjects = useMemo(() => {
+    if (!isClient) return [];
+    return getVisibleObjects(
+      cameraOffset.x,
+      cameraOffset.y,
+      viewportSize.width,
+      viewportSize.height
+    );
+  }, [cameraOffset.x, cameraOffset.y, viewportSize.width, viewportSize.height, isClient]);
+
   return (
     <div 
       className="relative overflow-hidden"
@@ -312,13 +357,51 @@ export default function Home() {
     >
       {/* Map container with camera offset */}
       <div
-        className="absolute bg-zinc-50 dark:bg-zinc-900"
+        className="absolute"
         style={{
           width: MAP_WIDTH,
           height: MAP_HEIGHT,
           transform: `translate(-${cameraOffset.x}px, -${cameraOffset.y}px)`,
         }}
       >
+        {/* LAYER 1: Tile Map (Background) */}
+        {visibleTiles.map((tile) => {
+          const tileDef = getTile(tile.tileId);
+          return (
+            <div
+              key={`tile-${tile.tileX}-${tile.tileY}`}
+              className="absolute"
+              style={{
+                left: tile.worldX,
+                top: tile.worldY,
+                width: 32,
+                height: 32,
+                backgroundColor: tileDef.color,
+                border: '1px solid rgba(0,0,0,0.1)',
+              }}
+            />
+          );
+        })}
+
+        {/* LAYER 2: World Objects (Furniture, etc.) */}
+        {visibleObjects.map((obj) => (
+          <div
+            key={obj.id}
+            className="absolute"
+            style={{
+              left: obj.x,
+              top: obj.y,
+              width: obj.width,
+              height: obj.height,
+              backgroundColor: obj.sprite,
+              border: '2px solid rgba(0,0,0,0.3)',
+              borderRadius: '4px',
+            }}
+            title={obj.name || obj.id}
+          />
+        ))}
+
+        {/* LAYER 3: Players */}
         {/* Current user */}
         {currentUserId && (
           <div
