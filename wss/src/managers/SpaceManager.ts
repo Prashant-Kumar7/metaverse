@@ -1,62 +1,103 @@
-import type { Space } from "../types/space.js";
-import type { User } from "../types/user.js";
+import WebSocket from "ws";
 
-class SpaceManager {
-    private spaces: Map<string, Space> = new Map();
-    private defaultSpaceId = "default_space";
-
-    constructor() {
-        // Create default space
-        this.spaces.set(this.defaultSpaceId, {
-            id: this.defaultSpaceId,
-            users: new Map(),
-        });
-    }
-
-    addUserToSpace(user: User, spaceId: string = this.defaultSpaceId): void {
-        const space = this.spaces.get(spaceId);
-        if (space) {
-            space.users.set(user.id, user);
-        }
-    }
-
-    removeUserFromSpace(userId: string, spaceId: string = this.defaultSpaceId): void {
-        const space = this.spaces.get(spaceId);
-        if (space) {
-            space.users.delete(userId);
-        }
-    }
-
-    getSpaceUsers(spaceId: string = this.defaultSpaceId): User[] {
-        const space = this.spaces.get(spaceId);
-        if (space) {
-            return Array.from(space.users.values());
-        }
-        return [];
-    }
-
-    broadcastToSpace(message: object, excludeUserId?: string, spaceId: string = this.defaultSpaceId): void {
-        const space = this.spaces.get(spaceId);
-        if (space) {
-            const messageStr = JSON.stringify(message);
-            const msg = message as { userId?: string; type?: string };
-            console.log(`[BROADCAST] Broadcasting ${msg.type} for userId ${msg.userId}, excluding ${excludeUserId}`);
-            console.log(`[BROADCAST] Users in space:`, Array.from(space.users.keys()));
-            
-            space.users.forEach((user) => {
-                if (user.id !== excludeUserId && user.ws.readyState === 1) { // 1 = OPEN
-                    console.log(`[BROADCAST] Sending to user ${user.id}`);
-                    user.ws.send(messageStr);
-                } else {
-                    if (user.id === excludeUserId) {
-                        console.log(`[BROADCAST] Skipping user ${user.id} (excluded)`);
-                    } else {
-                        console.log(`[BROADCAST] Skipping user ${user.id} (WebSocket not open, readyState: ${user.ws.readyState})`);
-                    }
-                }
-            });
-        }
-    }
+interface Host{
+    socket : WebSocket,
+    userId : string
 }
 
-export { SpaceManager };
+interface Participant{
+    [key : string] : WebSocket
+}
+
+interface Player{
+    userId : string,
+    username : string,
+}
+
+export class SpaceManager {
+    private host : Host;
+    private participants : Participant;
+    public spaceId : string;
+    private spaceName : string;
+    private playerList : Player[];
+    
+
+    constructor(socket : WebSocket, spaceId : string, userId : string, spaceName : string, username : string){
+        this.spaceId = spaceId;
+        this.spaceName = spaceName;
+        this.host = {
+            socket : socket,
+            userId : userId
+        }
+        this.participants = {
+            [this.host.userId] : this.host.socket
+        }
+        this.playerList = [{ userId: this.host.userId, username: username }]
+    }
+
+    joinSpace(socket : WebSocket, message : any){
+        if(this.playerList.some(p => p.userId === message.userId)){
+            this.participants[message.userId] = socket
+            return
+        }
+
+        if(this.playerList.length >= 6){
+            this.sendJoinSpaceFailure(socket, "full")
+            return
+        }
+        // socket.send(JSON.stringify({type : "room_seat_available", userId : message.userId}))
+
+        this.participants[message.userId] = socket
+        this.playerList.push({ userId: message.userId, username: message.username || "" })
+        this.sendJoinSpaceEvents(socket, message.userId)
+    }
+
+    sendChat(message : any){
+        this.playerList.forEach(player => {
+            if (this.participants[player.userId]) {
+                this.participants[player.userId]?.send(JSON.stringify({type : "CHAT", chat : message.chat, userId : message.userId}))
+            }
+        })
+    }
+
+
+    getJoinEvents(socket : WebSocket, message : any){
+        if(this.playerList.some(p => p.userId === message.userId)){
+            this.sendJoinSpaceEvents(socket, message.userId, true)
+        } else {
+            this.sendJoinSpaceEvents(socket, message.userId, false)
+        }
+    }
+    
+    sendJoinSpaceEvents(socket: WebSocket, userId: string, isReconnect: boolean = false) {
+        if (isReconnect) {
+            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : true, message : "You are already in the space", spaceId : this.spaceId}))
+        } else {
+            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : true, message : "You have joined the space successfully", spaceId : this.spaceId}))
+        }
+        // socket.send(JSON.stringify({type : "room_state", roomState : this.roomState}))
+        
+        // Broadcast updated player list to all players
+        this.playerList.forEach(player => {
+            if (this.participants[player.userId]) {
+                this.participants[player.userId]?.send(JSON.stringify({type : "PLAYER_LIST", playerList : this.playerList}))
+            }
+        })
+    }
+
+    sendJoinSpaceFailure(socket: WebSocket, reason: "full" | "not_found") {
+        if (reason === "full") {
+            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : false, message : "Space is full", spaceId : this.spaceId}))
+        } else {
+            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : false, message : "Space not found", spaceId : this.spaceId}))
+        }
+    }
+
+    move(socket : WebSocket, message : any){
+        this.playerList.forEach(player => {
+            if (this.participants[player.userId] !== socket) {
+                this.participants[player.userId]?.send(JSON.stringify({type : "MOVE", position : message.position, userId : message.userId}))
+            }
+        })
+    }  
+}

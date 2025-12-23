@@ -8,6 +8,9 @@ import {
   SignedOut,
   UserButton,
 } from "@clerk/nextjs";
+import { ThemeProvider } from "next-themes";
+import { Toaster } from "@/components/ui/sonner";
+import { WebSocketProvider } from "@/contexts/WebSocketContext";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -32,21 +35,34 @@ export default function RootLayout({
 }>) {
   return (
     <ClerkProvider>
-      <html lang="en" style={{ margin: 0, padding: 0, overflow: 'hidden', width: '100%', height: '100%' }}>
+      <html lang="en" suppressHydrationWarning>
         <body
           className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-          style={{ margin: 0, padding: 0, overflow: 'hidden', width: '100vw', height: '100vh' }}
         >
-          <header>
-            <SignedOut>
-              <SignInButton />
-              <SignUpButton />
-            </SignedOut>
-            <SignedIn>
-              <UserButton />
-            </SignedIn>
-          </header>
-          {children}
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            <WebSocketProvider>
+              <header className="border-b">
+                <div className="container mx-auto flex h-16 items-center justify-between px-4">
+                  <div className="flex items-center gap-4">
+                    <SignedOut>
+                      <SignInButton />
+                      <SignUpButton />
+                    </SignedOut>
+                    <SignedIn>
+                      <UserButton />
+                    </SignedIn>
+                  </div>
+                </div>
+              </header>
+              {children}
+              <Toaster />
+            </WebSocketProvider>
+          </ThemeProvider>
         </body>
       </html>
     </ClerkProvider>

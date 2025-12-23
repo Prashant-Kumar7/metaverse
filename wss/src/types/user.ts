@@ -1,11 +1,12 @@
-import type { WebSocket } from "ws";
+// import type { WebSocket } from "ws";
 
-interface User {
-    id: string;
-    ws: WebSocket;
-    x: number;
-    y: number;
-    color: string;
-}
+// interface User {
+//     id: string;
+//     ws: WebSocket;
+//     x: number;
+//     y: number;
+//     color: string;
+//     spaceId: string | null;
+// }
 
-export type { User };
+// export type { User };

@@ -1,465 +1,225 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { getVisibleTileData } from "@/lib/map/tilemap";
-import { getTile } from "@/lib/map/tileset";
-import { getVisibleObjects, getCollidableObjects } from "@/lib/world/worldObjects";
-import { checkUserObjectCollision } from "@/lib/world/WorldObject";
-
-interface User {
-  userId: string;
-  color: string;
-  position: { x: number; y: number };
-}
-
-const MAP_WIDTH = 4000;
-const MAP_HEIGHT = 4000;
-const USER_RADIUS = 15;
-const COLLISION_DISTANCE = USER_RADIUS * 2;
-const MOVE_SPEED = 3; // pixels per frame for smooth movement
+import { useRouter } from "next/navigation";
+import { SignedIn, SignedOut, SignInButton, SignUpButton } from "@clerk/nextjs";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Sparkles,
+  Users,
+  Globe,
+  Zap,
+  Shield,
+  ArrowRight,
+  Map,
+  Gamepad2,
+  MessageSquare,
+  Lock,
+} from "lucide-react";
 
 export default function Home() {
-  const [users, setUsers] = useState<Map<string, User>>(new Map());
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const [currentColor, setCurrentColor] = useState<string>("");
-  const [position, setPosition] = useState({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
-  const [cameraOffset, setCameraOffset] = useState({ x: 0, y: 0 });
-  // Initialize with default values to avoid hydration mismatch
-  const [viewportSize, setViewportSize] = useState({ width: 1200, height: 800 });
-  const [isClient, setIsClient] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
-  const positionRef = useRef({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
-  const keysPressedRef = useRef<Set<string>>(new Set());
-  const animationFrameRef = useRef<number | null>(null);
-  const lastUpdateTimeRef = useRef<number>(0); // Reset to 0 to ensure first update
-  const lastStateUpdateTimeRef = useRef<number>(0); // Separate timer for state updates
-  const currentUserIdRef = useRef<string | null>(null);
-  const usersRef = useRef<Map<string, User>>(new Map());
+  const router = useRouter();
 
-  // Set client-side flag and initialize viewport size after mount
-  useEffect(() => {
-    setIsClient(true);
-    setViewportSize({ width: window.innerWidth, height: window.innerHeight });
-  }, []);
-
-  useEffect(() => {
-    // Only connect to WebSocket on client side
-    if (!isClient) return;
-    
-    // Connect to WebSocket server
-    const ws = new WebSocket("ws://localhost:8080");
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log("Connected to WebSocket server");
-    };
-
-    ws.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      console.log("[WS RECEIVE] Message type:", message.type, "userId:", message.userId, "myUserId:", currentUserIdRef.current);
-
-      if (message.type === "connected") {
-        const userId = message.userId;
-        const pos = message.position;
-        console.log("[CONNECTED] Setting current user:", userId, "position:", pos);
-        currentUserIdRef.current = userId; // Update ref immediately
-        setCurrentUserId(userId);
-        setCurrentColor(message.color);
-        positionRef.current = pos;
-        setPosition(pos);
-        // Camera will update automatically via useEffect when position state updates
-      } else if (message.type === "userJoined") {
-        // Add other users - safety check to never add ourselves
-        const myUserId = currentUserIdRef.current;
-        console.log("[USER_JOINED] userId:", message.userId, "myUserId:", myUserId);
-        if (message.userId === myUserId) {
-          console.warn("[USER_JOINED] Received own userJoined message, ignoring");
-          return;
-        }
-        
-        setUsers((prev) => {
-          const newUsers = new Map(prev);
-          // Double-check we're not adding ourselves
-          if (message.userId !== myUserId) {
-            console.log("[USER_JOINED] Adding user to map:", message.userId, "position:", message.position);
-            newUsers.set(message.userId, {
-              userId: message.userId,
-              color: message.color,
-              position: message.position,
-            });
-          } else {
-            console.warn("[USER_JOINED] Blocked adding self to users map");
-          }
-          return newUsers;
-        });
-      } else if (message.type === "userMoved") {
-        // Update OTHER users' positions ONLY - never update our own position from server
-        // Use ref to get current userId to avoid stale closure issues
-        const myUserId = currentUserIdRef.current;
-        console.log("[USER_MOVED] Received move for userId:", message.userId, "myUserId:", myUserId, "position:", message.position);
-        
-        if (message.userId === myUserId) {
-          // Safety check: we should never receive our own movement messages
-          console.warn("[USER_MOVED] ERROR: Received own userMoved message, ignoring!");
-          return;
-        }
-        
-        setUsers((prev) => {
-          console.log("[USER_MOVED] Current users in map:", Array.from(prev.keys()));
-          const newUsers = new Map(prev);
-          const user = newUsers.get(message.userId);
-          console.log("[USER_MOVED] Found user in map:", user ? "yes" : "no");
-          
-          // Double-check again using ref
-          if (user && user.userId !== myUserId) {
-            console.log("[USER_MOVED] Updating user position:", message.userId, "from", user.position, "to", message.position);
-            user.position = message.position;
-            newUsers.set(message.userId, user);
-          } else {
-            console.warn("[USER_MOVED] Blocked update - user not found or is self");
-          }
-          return newUsers;
-        });
-      } else if (message.type === "userLeft") {
-        console.log("[USER_LEFT] userId:", message.userId);
-        setUsers((prev) => {
-          const newUsers = new Map(prev);
-          newUsers.delete(message.userId);
-          return newUsers;
-        });
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-    };
-
-    ws.onclose = () => {
-      console.log("WebSocket connection closed");
-    };
-
-    return () => {
-      ws.close();
-    };
-  }, [isClient]);
-
-  const sendPosition = useCallback((x: number, y: number) => {
-    const myUserId = currentUserIdRef.current;
-    console.log("[SEND_POSITION] Sending position for userId:", myUserId, "position:", { x, y });
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          type: "move",
-          position: { x, y },
-        })
-      );
-    } else {
-      console.warn("[SEND_POSITION] WebSocket not open, readyState:", wsRef.current?.readyState);
-    }
-  }, []);
-
-  // Keep usersRef in sync with users state
-  useEffect(() => {
-    usersRef.current = users;
-  }, [users]);
-
-  // Check collision with other users AND world objects
-
-  const checkCollision = useCallback((newX: number, newY: number): boolean => {
-    const myUserId = currentUserIdRef.current;
-    
-    // Check collision with other users (use ref to get latest without dependency)
-    const allUsers = Array.from(usersRef.current.values());
-    for (const user of allUsers) {
-      // Skip collision check with ourselves
-      if (user.userId === myUserId) continue;
-      
-      const dx = newX - user.position.x;
-      const dy = newY - user.position.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      
-      if (distance < COLLISION_DISTANCE) {
-        return true; // Collision detected with another user
-      }
-    }
-    
-    // Check collision with world objects (static, no dependency needed)
-    const collidableObjects = getCollidableObjects();
-    
-    for (const obj of collidableObjects) {
-      if (checkUserObjectCollision(newX, newY, USER_RADIUS, obj)) {
-        return true; // Collision detected with world object
-      }
-    }
-    
-    return false;
-  }, []); // No dependencies - uses refs and static functions
-
-  // Camera follows LOCAL user position - updates whenever local position or viewport changes
-  useEffect(() => {
-    if (!currentUserId || !isClient) return;
-    
-    // Calculate camera position directly without separate callback to avoid dependency issues
-    const width = viewportSize.width;
-    const height = viewportSize.height;
-    let cameraX = position.x - width / 2;
-    let cameraY = position.y - height / 2;
-
-    // Clamp camera at map edges
-    cameraX = Math.max(0, Math.min(cameraX, MAP_WIDTH - width));
-    cameraY = Math.max(0, Math.min(cameraY, MAP_HEIGHT - height));
-
-    setCameraOffset({ x: cameraX, y: cameraY });
-  }, [position.x, position.y, viewportSize.width, viewportSize.height, currentUserId, isClient]);
-
-  // Handle window resize
-  useEffect(() => {
-    const handleResize = () => {
-      const newSize = { width: window.innerWidth, height: window.innerHeight };
-      setViewportSize(newSize);
-      // Update camera with new viewport size (following local user)
-      const pos = positionRef.current;
-      let cameraX = pos.x - newSize.width / 2;
-      let cameraY = pos.y - newSize.height / 2;
-      cameraX = Math.max(0, Math.min(cameraX, MAP_WIDTH - newSize.width));
-      cameraY = Math.max(0, Math.min(cameraY, MAP_HEIGHT - newSize.height));
-      setCameraOffset({ x: cameraX, y: cameraY });
-    };
-
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
-
-  // Smooth movement with animation frame
-  useEffect(() => {
-    if (!currentUserId || !isClient) return;
-
-    const moveUser = () => {
-      const keys = keysPressedRef.current;
-      let newX = positionRef.current.x;
-      let newY = positionRef.current.y;
-      let moved = false;
-
-      if (keys.has("ArrowUp")) {
-        newY = Math.max(USER_RADIUS, newY - MOVE_SPEED);
-        moved = true;
-      }
-      if (keys.has("ArrowDown")) {
-        newY = Math.min(MAP_HEIGHT - USER_RADIUS, newY + MOVE_SPEED);
-        moved = true;
-      }
-      if (keys.has("ArrowLeft")) {
-        newX = Math.max(USER_RADIUS, newX - MOVE_SPEED);
-        moved = true;
-      }
-      if (keys.has("ArrowRight")) {
-        newX = Math.min(MAP_WIDTH - USER_RADIUS, newX + MOVE_SPEED);
-        moved = true;
-      }
-
-      if (moved) {
-        const myUserId = currentUserIdRef.current;
-        console.log("[MOVE_USER] Attempting to move userId:", myUserId, "from", positionRef.current, "to", { x: newX, y: newY });
-        
-        // Check collision before moving (only check other users, not ourselves)
-        const hasCollision = checkCollision(newX, newY);
-        console.log("[MOVE_USER] Collision check result:", hasCollision);
-        
-        if (!hasCollision) {
-          positionRef.current = { x: newX, y: newY };
-          
-          const now = Date.now();
-          
-          // Throttle position state updates to avoid excessive re-renders
-          // Only update state every ~16ms (~60fps) to reduce camera update frequency
-          if (now - lastStateUpdateTimeRef.current > 16) {
-            setPosition({ x: newX, y: newY }); // This will trigger camera update via useEffect
-            lastStateUpdateTimeRef.current = now;
-          }
-          
-          // Throttle position updates to server (every ~50ms)
-          if (now - lastUpdateTimeRef.current > 50) {
-            sendPosition(newX, newY);
-            lastUpdateTimeRef.current = now;
-          }
-        }
-      }
-
-      animationFrameRef.current = requestAnimationFrame(moveUser);
-    };
-
-    animationFrameRef.current = requestAnimationFrame(moveUser);
-
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-  }, [currentUserId, isClient, checkCollision, sendPosition]);
-
-  // Handle keyboard input
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
-        e.preventDefault();
-        keysPressedRef.current.add(e.key);
-      }
-    };
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
-        keysPressedRef.current.delete(e.key);
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
-    
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-    };
-  }, []);
-
-  // Calculate visible tiles for rendering (memoized for performance)
-  // Only calculate if client-side to avoid hydration issues
-  const visibleTiles = useMemo(() => {
-    if (!isClient) return [];
-    return getVisibleTileData(
-      cameraOffset.x,
-      cameraOffset.y,
-      viewportSize.width,
-      viewportSize.height
-    );
-  }, [cameraOffset.x, cameraOffset.y, viewportSize.width, viewportSize.height, isClient]);
-
-  // Calculate visible world objects for rendering (memoized for performance)
-  // Only calculate if client-side to avoid hydration issues
-  const visibleObjects = useMemo(() => {
-    if (!isClient) return [];
-    return getVisibleObjects(
-      cameraOffset.x,
-      cameraOffset.y,
-      viewportSize.width,
-      viewportSize.height
-    );
-  }, [cameraOffset.x, cameraOffset.y, viewportSize.width, viewportSize.height, isClient]);
+  const features = [
+    {
+      icon: Globe,
+      title: "Virtual Spaces",
+      description: "Create and customize your own virtual spaces. Build unique environments where you can interact with others.",
+    },
+    {
+      icon: Users,
+      title: "Real-time Multiplayer",
+      description: "Connect with friends and strangers in real-time. See others move, interact, and explore together.",
+    },
+    {
+      icon: Map,
+      title: "Large World Maps",
+      description: "Explore vast 4000x4000 pixel worlds with tile-based maps and interactive objects.",
+    },
+    {
+      icon: Zap,
+      title: "Instant Connection",
+      description: "Join spaces instantly with unique codes. No downloads, no waiting - just pure connection.",
+    },
+    {
+      icon: Gamepad2,
+      title: "Smooth Movement",
+      description: "Navigate with arrow keys through beautifully rendered worlds with collision detection.",
+    },
+    {
+      icon: MessageSquare,
+      title: "Live Updates",
+      description: "Experience real-time position updates and see other users move smoothly across the space.",
+    },
+    {
+      icon: Shield,
+      title: "Secure & Private",
+      description: "Your spaces are secure. Control who can join and when with unique access codes.",
+    },
+    {
+      icon: Lock,
+      title: "User Authentication",
+      description: "Secure login with Clerk authentication. Your identity is protected and verified.",
+    },
+  ];
 
   return (
-    <div 
-      className="relative overflow-hidden"
-      style={{ 
-        width: "100vw", 
-        height: "100vh",
-        margin: 0,
-        padding: 0,
-      }}
-    >
-      {/* Map container with camera offset */}
-      <div
-        className="absolute"
-        style={{
-          width: MAP_WIDTH,
-          height: MAP_HEIGHT,
-          transform: `translate(-${cameraOffset.x}px, -${cameraOffset.y}px)`,
-        }}
-      >
-        {/* LAYER 1: Tile Map (Background) */}
-        {visibleTiles.map((tile) => {
-          const tileDef = getTile(tile.tileId);
-          return (
-            <div
-              key={`tile-${tile.tileX}-${tile.tileY}`}
-              className="absolute"
-              style={{
-                left: tile.worldX,
-                top: tile.worldY,
-                width: 32,
-                height: 32,
-                backgroundColor: tileDef.color,
-                border: '1px solid rgba(0,0,0,0.1)',
-              }}
-            />
-          );
-        })}
+    <div className="min-h-screen bg-background">
+      {/* Hero Section */}
+      <section className="relative overflow-hidden border-b">
+        <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-background to-background" />
+        <div className="container relative mx-auto px-4 py-24 md:py-32">
+          <div className="mx-auto max-w-3xl text-center">
+            <div className="mb-6 flex justify-center">
+              <div className="rounded-full bg-primary/10 p-4">
+                <Sparkles className="size-12 text-primary" />
+              </div>
+            </div>
+            <h1 className="mb-6 text-5xl font-bold tracking-tight md:text-6xl lg:text-7xl">
+              Welcome to the
+              <span className="bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">
+                {" "}
+                Metaverse
+              </span>
+            </h1>
+            <p className="mb-8 text-xl text-muted-foreground md:text-2xl">
+              Create, explore, and connect in immersive virtual spaces. Build your world, invite friends, and
+              experience the future of social interaction.
+            </p>
+            <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
+              <SignedIn>
+                <Button
+                  size="lg"
+                  onClick={() => router.push("/dashboard")}
+                  className="text-lg px-8"
+                >
+                  Go to Dashboard
+                  <ArrowRight className="ml-2 size-5" />
+                </Button>
+              </SignedIn>
+              <SignedOut>
+                <SignUpButton mode="modal">
+                  <Button size="lg" className="text-lg px-8">
+                    Get Started
+                    <ArrowRight className="ml-2 size-5" />
+                  </Button>
+                </SignUpButton>
+                <SignInButton mode="modal">
+                  <Button size="lg" variant="outline" className="text-lg px-8">
+                    Sign In
+                  </Button>
+                </SignInButton>
+              </SignedOut>
+            </div>
+          </div>
+        </div>
+      </section>
 
-        {/* LAYER 2: World Objects (Furniture, etc.) */}
-        {visibleObjects.map((obj) => (
-          <div
-            key={obj.id}
-            className="absolute"
-            style={{
-              left: obj.x,
-              top: obj.y,
-              width: obj.width,
-              height: obj.height,
-              backgroundColor: obj.sprite,
-              border: '2px solid rgba(0,0,0,0.3)',
-              borderRadius: '4px',
-            }}
-            title={obj.name || obj.id}
-          />
-        ))}
-
-        {/* LAYER 3: Players */}
-        {/* Current user */}
-        {currentUserId && (
-          <div
-            className="absolute rounded-full border-2 border-black dark:border-white"
-            style={{
-              left: position.x,
-              top: position.y,
-              width: USER_RADIUS * 2,
-              height: USER_RADIUS * 2,
-              backgroundColor: currentColor,
-              transform: "translate(-50%, -50%)",
-            }}
-          />
-        )}
-        {/* Other users - filter out current user as safety measure */}
-        {(() => {
-          const otherUsers = Array.from(users.values()).filter((user) => user.userId !== currentUserId);
-          console.log("[RENDER] Current userId:", currentUserId);
-          console.log("[RENDER] Users in map:", Array.from(users.keys()));
-          console.log("[RENDER] Other users to render:", otherUsers.map(u => ({ userId: u.userId, position: u.position, color: u.color })));
-          console.log("[RENDER] Current user position:", position);
-          console.log("[RENDER] Camera offset:", cameraOffset);
-          
-          return otherUsers.map((user) => {
-            const screenX = user.position.x - cameraOffset.x;
-            const screenY = user.position.y - cameraOffset.y;
-            console.log(`[RENDER] Rendering user ${user.userId} at map position (${user.position.x}, ${user.position.y}), screen position (${screenX}, ${screenY})`);
-            
+      {/* Features Section */}
+      <section className="container mx-auto px-4 py-24">
+        <div className="mb-16 text-center">
+          <h2 className="mb-4 text-4xl font-bold tracking-tight">Powerful Features</h2>
+          <p className="mx-auto max-w-2xl text-lg text-muted-foreground">
+            Everything you need to create and explore virtual spaces with friends and communities.
+          </p>
+        </div>
+        <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+          {features.map((feature, index) => {
+            const Icon = feature.icon;
             return (
-              <div
-                key={user.userId}
-                className="absolute rounded-full border-2 border-black dark:border-white"
-                style={{
-                  left: user.position.x,
-                  top: user.position.y,
-                  width: USER_RADIUS * 2,
-                  height: USER_RADIUS * 2,
-                  backgroundColor: user.color,
-                  transform: "translate(-50%, -50%)",
-                }}
-              />
+              <Card key={index} className="border-2 transition-all hover:border-primary/50 hover:shadow-lg">
+                <CardHeader>
+                  <div className="mb-4 flex size-12 items-center justify-center rounded-lg bg-primary/10">
+                    <Icon className="size-6 text-primary" />
+                  </div>
+                  <CardTitle className="text-xl">{feature.title}</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <CardDescription className="text-base">{feature.description}</CardDescription>
+                </CardContent>
+              </Card>
             );
-          });
-        })()}
-      </div>
-      
-      {/* UI Overlay */}
-      <div className="absolute top-4 left-4 z-10">
-        <h1 className="text-xl font-semibold text-black dark:text-zinc-50 mb-1">
-          Metaverse - Real-time Movement
-        </h1>
-        <p className="text-sm text-zinc-600 dark:text-zinc-400">
-          Use arrow keys to move. Your color: {currentColor || "connecting..."}
-        </p>
-        <p className="text-xs text-zinc-500 dark:text-zinc-500 mt-1">
-          Users online: {users.size + (currentUserId ? 1 : 0)}
-        </p>
-      </div>
+          })}
+        </div>
+      </section>
+
+      {/* How It Works Section */}
+      <section className="border-t bg-muted/30">
+        <div className="container mx-auto px-4 py-24">
+          <div className="mb-16 text-center">
+            <h2 className="mb-4 text-4xl font-bold tracking-tight">How It Works</h2>
+            <p className="mx-auto max-w-2xl text-lg text-muted-foreground">
+              Get started in three simple steps
+            </p>
+          </div>
+          <div className="grid gap-8 md:grid-cols-3">
+            <div className="text-center">
+              <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-primary text-2xl font-bold text-primary-foreground">
+                1
+              </div>
+              <h3 className="mb-2 text-2xl font-semibold">Sign Up</h3>
+              <p className="text-muted-foreground">
+                Create your account with secure authentication. It only takes a minute to get started.
+              </p>
+            </div>
+            <div className="text-center">
+              <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-primary text-2xl font-bold text-primary-foreground">
+                2
+              </div>
+              <h3 className="mb-2 text-2xl font-semibold">Create or Join</h3>
+              <p className="text-muted-foreground">
+                Create your own virtual space or join an existing one using a unique space code.
+              </p>
+            </div>
+            <div className="text-center">
+              <div className="mb-4 inline-flex size-16 items-center justify-center rounded-full bg-primary text-2xl font-bold text-primary-foreground">
+                3
+              </div>
+              <h3 className="mb-2 text-2xl font-semibold">Explore & Connect</h3>
+              <p className="text-muted-foreground">
+                Navigate through the world, interact with objects, and connect with other users in real-time.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* CTA Section */}
+      <section className="container mx-auto px-4 py-24">
+        <Card className="border-2 border-primary/20 bg-gradient-to-br from-primary/5 to-background">
+          <CardContent className="px-8 py-16 text-center">
+            <h2 className="mb-4 text-4xl font-bold tracking-tight">Ready to Get Started?</h2>
+            <p className="mb-8 mx-auto max-w-2xl text-lg text-muted-foreground">
+              Join thousands of users exploring the metaverse. Create your space today and start your journey.
+            </p>
+            <div className="flex flex-col items-center justify-center gap-4 sm:flex-row">
+              <SignedIn>
+                <Button
+                  size="lg"
+                  onClick={() => router.push("/dashboard")}
+                  className="text-lg px-8"
+                >
+                  Go to Dashboard
+                  <ArrowRight className="ml-2 size-5" />
+                </Button>
+              </SignedIn>
+              <SignedOut>
+                <SignUpButton mode="modal">
+                  <Button size="lg" className="text-lg px-8">
+                    Create Account
+                    <ArrowRight className="ml-2 size-5" />
+                  </Button>
+                </SignUpButton>
+                <SignInButton mode="modal">
+                  <Button size="lg" variant="outline" className="text-lg px-8">
+                    Sign In
+                  </Button>
+                </SignInButton>
+              </SignedOut>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
     </div>
   );
 }
