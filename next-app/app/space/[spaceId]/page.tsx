@@ -18,6 +18,12 @@ interface User {
   position: { x: number; y: number };
 }
 
+interface UserInterpolation {
+  current: { x: number; y: number };
+  target: { x: number; y: number };
+  lastUpdateTime: number;
+}
+
 interface ChatMessage {
   userId: string;
   chat: string;
@@ -61,6 +67,9 @@ export default function SpacePage() {
   const collidableObjectsRef = useRef<ReturnType<typeof getCollidableObjects> | null>(null);
   const lastFrameTimeRef = useRef<number>(performance.now());
   const currentUserIdRef = useRef<string | undefined>(user?.id);
+  // Smooth interpolation for other users' movement
+  const userInterpolationsRef = useRef<Map<string, UserInterpolation>>(new Map());
+  const interpolationAnimationRef = useRef<number | null>(null);
 
   // Set client-side flag and initialize viewport size after mount
   useEffect(() => {
@@ -184,23 +193,40 @@ export default function SpacePage() {
         return;
       }
       
+      // Update target position for smooth interpolation
+      const interpolations = userInterpolationsRef.current;
+      const existingInterpolation = interpolations.get(message.userId);
+      
+      if (existingInterpolation) {
+        // Update target position, keep current position for smooth transition
+        existingInterpolation.target = message.position;
+        existingInterpolation.lastUpdateTime = Date.now();
+      } else {
+        // First time seeing this user, set both current and target to the same position
+        interpolations.set(message.userId, {
+          current: message.position,
+          target: message.position,
+          lastUpdateTime: Date.now(),
+        });
+      }
+      
       setUsers((prev) => {
         const newUsers = new Map(prev);
         const user = newUsers.get(message.userId);
         
         if (user) {
-          // Update existing user position and color if provided
-          user.position = message.position;
+          // Update color if provided, but position will be interpolated
           if (message.userColour) {
             user.color = message.userColour;
           }
+          // Position will be updated by interpolation loop
           newUsers.set(message.userId, user);
         } else {
           // User not in our list yet, add them with color from message or default
           newUsers.set(message.userId, {
             userId: message.userId,
             color: message.userColour || "#888888", // Use color from server if available
-            position: message.position,
+            position: message.position, // Initial position
           });
         }
         return newUsers;
@@ -251,11 +277,30 @@ export default function SpacePage() {
             
             const existingUser = newUsers.get(pos.userId);
             if (existingUser) {
-              // Update position for existing user
+              // Update target position for interpolation
+              const interpolations = userInterpolationsRef.current;
+              const interpolation = interpolations.get(pos.userId);
+              if (interpolation) {
+                interpolation.target = pos.position;
+                interpolation.lastUpdateTime = Date.now();
+              } else {
+                interpolations.set(pos.userId, {
+                  current: existingUser.position,
+                  target: pos.position,
+                  lastUpdateTime: Date.now(),
+                });
+              }
+              // Update position will happen via interpolation
               existingUser.position = pos.position;
               newUsers.set(pos.userId, existingUser);
             } else {
               // Add new user with position - color will come from PLAYER_LIST
+              const interpolations = userInterpolationsRef.current;
+              interpolations.set(pos.userId, {
+                current: pos.position,
+                target: pos.position,
+                lastUpdateTime: Date.now(),
+              });
               newUsers.set(pos.userId, {
                 userId: pos.userId,
                 color: "#888888", // Default color, will be updated by PLAYER_LIST
@@ -327,6 +372,25 @@ export default function SpacePage() {
   // Keep usersRef in sync with users state
   useEffect(() => {
     usersRef.current = users;
+    
+    // Initialize interpolations for new users
+    const interpolations = userInterpolationsRef.current;
+    users.forEach((user) => {
+      if (!interpolations.has(user.userId)) {
+        interpolations.set(user.userId, {
+          current: user.position,
+          target: user.position,
+          lastUpdateTime: Date.now(),
+        });
+      }
+    });
+    
+    // Clean up interpolations for users that left
+    interpolations.forEach((_, userId) => {
+      if (!users.has(userId)) {
+        interpolations.delete(userId);
+      }
+    });
   }, [users]);
 
   // Cache collidable objects to avoid recalculating every frame
@@ -401,6 +465,54 @@ export default function SpacePage() {
     
     return false;
   }, []);
+
+  // Smooth interpolation for other users' movement
+  useEffect(() => {
+    if (!isClient) return;
+
+    const interpolateUsers = () => {
+      const interpolations = userInterpolationsRef.current;
+      const users = usersRef.current;
+      let needsUpdate = false;
+
+      interpolations.forEach((interpolation, userId) => {
+        const user = users.get(userId);
+        if (!user) return;
+
+        const dx = interpolation.target.x - interpolation.current.x;
+        const dy = interpolation.target.y - interpolation.current.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        // If we're close enough, snap to target
+        if (distance < 1) {
+          interpolation.current = { ...interpolation.target };
+          user.position = { ...interpolation.current };
+          needsUpdate = true;
+        } else if (distance > 0) {
+          // Interpolate towards target (lerp factor ~0.15 for smooth but responsive movement)
+          const lerpFactor = 0.15;
+          interpolation.current.x += dx * lerpFactor;
+          interpolation.current.y += dy * lerpFactor;
+          user.position = { ...interpolation.current };
+          needsUpdate = true;
+        }
+      });
+
+      if (needsUpdate) {
+        setUsers(new Map(users));
+      }
+
+      interpolationAnimationRef.current = requestAnimationFrame(interpolateUsers);
+    };
+
+    interpolationAnimationRef.current = requestAnimationFrame(interpolateUsers);
+
+    return () => {
+      if (interpolationAnimationRef.current) {
+        cancelAnimationFrame(interpolationAnimationRef.current);
+      }
+    };
+  }, [isClient]);
 
   // Camera smoothly follows LOCAL user position (updated in animation loop)
   // This useEffect only initializes the camera, actual updates happen in the animation frame
