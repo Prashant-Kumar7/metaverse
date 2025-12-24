@@ -12,6 +12,21 @@ interface Participant{
 interface Player{
     userId : string,
     username : string,
+    userColour : string
+}
+
+/**
+ * Generates a random hex color
+ * @returns A random hex color string (e.g., "#FF5733")
+ */
+function generateRandomColor(): string {
+    // Generate a random color with good visibility (avoiding very dark colors)
+    const letters = '0123456789ABCDEF';
+    let color = '#';
+    for (let i = 0; i < 6; i++) {
+        color += letters[Math.floor(Math.random() * 16)];
+    }
+    return color;
 }
 
 export class SpaceManager {
@@ -22,7 +37,7 @@ export class SpaceManager {
     private playerList : Player[];
     
 
-    constructor(socket : WebSocket, spaceId : string, userId : string, spaceName : string, username : string){
+    constructor(socket : WebSocket, spaceId : string, userId : string, spaceName : string, username : string, userColour : string){
         this.spaceId = spaceId;
         this.spaceName = spaceName;
         this.host = {
@@ -32,12 +47,19 @@ export class SpaceManager {
         this.participants = {
             [this.host.userId] : this.host.socket
         }
-        this.playerList = [{ userId: this.host.userId, username: username }]
+        // Always assign color server-side (ignore any color from client)
+        const assignedColor = generateRandomColor();
+        this.playerList = [{ userId: this.host.userId, username: username, userColour : assignedColor }]
     }
 
     joinSpace(socket : WebSocket, message : any){
         if(this.playerList.some(p => p.userId === message.userId)){
             this.participants[message.userId] = socket
+            // Send join events for reconnecting user
+            const existingPlayer = this.playerList.find(p => p.userId === message.userId);
+            if(existingPlayer){
+                this.sendJoinSpaceEvents(socket, message.userId, true, existingPlayer.userColour)
+            }
             return
         }
 
@@ -48,8 +70,10 @@ export class SpaceManager {
         // socket.send(JSON.stringify({type : "room_seat_available", userId : message.userId}))
 
         this.participants[message.userId] = socket
-        this.playerList.push({ userId: message.userId, username: message.username || "" })
-        this.sendJoinSpaceEvents(socket, message.userId)
+        // Always assign color server-side (ignore any color from client)
+        const assignedColor = generateRandomColor();
+        this.playerList.push({ userId: message.userId, username: message.username || "", userColour : assignedColor })
+        this.sendJoinSpaceEvents(socket, message.userId, false, assignedColor)
     }
 
     sendChat(message : any){
@@ -61,19 +85,19 @@ export class SpaceManager {
     }
 
 
-    getJoinEvents(socket : WebSocket, message : any){
+    getJoinEvents(socket : WebSocket, message : any, userColour : string){
         if(this.playerList.some(p => p.userId === message.userId)){
-            this.sendJoinSpaceEvents(socket, message.userId, true)
+            this.sendJoinSpaceEvents(socket, message.userId, true, userColour)
         } else {
-            this.sendJoinSpaceEvents(socket, message.userId, false)
+            this.sendJoinSpaceEvents(socket, message.userId, false, userColour)
         }
     }
     
-    sendJoinSpaceEvents(socket: WebSocket, userId: string, isReconnect: boolean = false) {
+    sendJoinSpaceEvents(socket: WebSocket, userId: string, isReconnect: boolean = false, userColour : string) {
         if (isReconnect) {
-            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : true, message : "You are already in the space", spaceId : this.spaceId}))
+            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : true, message : "You are already in the space", spaceId : this.spaceId, userColour : userColour}))
         } else {
-            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : true, message : "You have joined the space successfully", spaceId : this.spaceId}))
+            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : true, message : "You have joined the space successfully", spaceId : this.spaceId, userColour : userColour}))
         }
         // socket.send(JSON.stringify({type : "room_state", roomState : this.roomState}))
         
@@ -93,10 +117,23 @@ export class SpaceManager {
         }
     }
 
+    getUserColour(userId: string): string {
+        const player = this.playerList.find(p => p.userId === userId);
+        return player?.userColour || "#888888";
+    }
+
     move(socket : WebSocket, message : any){
+        // Find the moving user's color from playerList
+        const userColour = this.getUserColour(message.userId);
+        
         this.playerList.forEach(player => {
             if (this.participants[player.userId] !== socket) {
-                this.participants[player.userId]?.send(JSON.stringify({type : "MOVE", position : message.position, userId : message.userId}))
+                this.participants[player.userId]?.send(JSON.stringify({
+                    type : "MOVE", 
+                    position : message.position, 
+                    userId : message.userId,
+                    userColour : userColour
+                }))
             }
         })
     }  

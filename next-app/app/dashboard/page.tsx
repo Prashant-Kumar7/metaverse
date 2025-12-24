@@ -28,36 +28,53 @@ import { Label } from "@/components/ui/label"
 import { ThemeToggle } from "@/components/theme-toggle"
 import { toast } from "sonner"
 import { useWebSocket } from "@/contexts/WebSocketContext"
+import { useUser } from "@clerk/nextjs"
 
 export default function DashboardPage() {
   const router = useRouter()
+  const { user } = useUser()
   const [createSpaceOpen, setCreateSpaceOpen] = useState(false)
   const [joinSpaceOpen, setJoinSpaceOpen] = useState(false)
   const [spaceName, setSpaceName] = useState("")
   const [spaceCode, setSpaceCode] = useState("")
+  const [username, setUsername] = useState("")
   const { sendMessage, addMessageListener, isConnected } = useWebSocket()
 
   // Hide top navigation from layout
   useEffect(() => {
     const header = document.querySelector('header:first-of-type');
     if (header) {
-      header.style.display = 'none';
+      (header as HTMLElement).style.display = 'none';
     }
     
     return () => {
       // Restore header on unmount
       if (header) {
-        header.style.display = '';
+        (header as HTMLElement).style.display = '';
       }
     };
   }, []);
+
+  // Generate username on mount if not set
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !username) {
+      const stored = localStorage.getItem('metaverse_username');
+      if (stored) {
+        setUsername(stored);
+      } else {
+        const defaultUsername = `User${Math.floor(Math.random() * 10000)}`;
+        setUsername(defaultUsername);
+        localStorage.setItem('metaverse_username', defaultUsername);
+      }
+    }
+  }, [username]);
 
   useEffect(() => {
     const offSpaceCreated = addMessageListener("spaceCreated", (message) => {
       // Dismiss any existing toasts before showing new one
       toast.dismiss()
-      toast.success(`Space "${message.name}" created!`, {
-        description: `Code: ${message.code}`,
+      toast.success(`Space created successfully!`, {
+        description: `Space ID: ${message.spaceId}`,
         duration: 2000,
       })
       setSpaceName("")
@@ -71,8 +88,8 @@ export default function DashboardPage() {
     const offSpaceJoined = addMessageListener("spaceJoined", (message) => {
       // Dismiss any existing toasts before showing new one
       toast.dismiss()
-      toast.success(`Joined space: ${message.name}`, {
-        description: `Code: ${message.code}`,
+      toast.success(`Joined space successfully!`, {
+        description: `Space ID: ${message.spaceId}`,
         duration: 2000,
       })
       setSpaceCode("")
@@ -100,10 +117,12 @@ export default function DashboardPage() {
       toast.dismiss("quick-join")
       
       if (message.status === true) {
-        // Send joinSpace message to actually join the space
+        // Send JOIN_SPACE message to actually join the space
         sendMessage(JSON.stringify({
-          type: "joinSpace",
-          spaceId: message.spaceId
+          type: "JOIN_SPACE",
+          userId: user?.id,
+          spaceId: message.spaceId,
+          username: username || "User"
         }))
         // Navigation will happen via spaceJoined listener
       } else {
@@ -128,30 +147,41 @@ export default function DashboardPage() {
       return
     }
     
-    if (isConnected) {
-      sendMessage(JSON.stringify({
-        type: "createSpace",
-        name: spaceName.trim()
-      }))
-    } else {
+    if (!isConnected) {
       toast.error("Not connected to server. Please try again.")
+      return
     }
+    
+    // Generate spaceId (timestamp + random string)
+    const spaceId = `space_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    
+    sendMessage(JSON.stringify({
+      type: "CREATE_SPACE",
+      userId: user?.id,
+      spaceId: spaceId,
+      spaceName: spaceName.trim(),
+      username: username || "User",
+    }))
   }
 
   const handleJoinSpace = () => {
     if (!spaceCode.trim()) {
-      toast.error("Please enter a space code")
+      toast.error("Please enter a space ID")
       return
     }
     
-    if (isConnected) {
-      sendMessage(JSON.stringify({
-        type: "joinSpace",
-        code: spaceCode.trim().toUpperCase()
-      }))
-    } else {
+    if (!isConnected) {
       toast.error("Not connected to server. Please try again.")
+      return
     }
+    
+    // Use spaceCode as spaceId (user enters the full space ID)
+    sendMessage(JSON.stringify({
+      type: "JOIN_SPACE",
+      userId: user?.id,
+      spaceId: spaceCode.trim(),
+      username: username || "User"
+    }))
   }
 
   const handleQuickJoin = () => {
@@ -162,7 +192,7 @@ export default function DashboardPage() {
     
     toast.loading("Finding available space...", { id: "quick-join" })
     sendMessage(JSON.stringify({
-      type: "quickJoinSpace"
+      type: "QUICK_JOIN_SPACE"
     }))
   }
 
@@ -318,24 +348,23 @@ export default function DashboardPage() {
                       <DialogHeader>
                         <DialogTitle>Join Space</DialogTitle>
                         <DialogDescription>
-                          Enter the space code provided by the space creator.
+                          Enter the space ID provided by the space creator.
                         </DialogDescription>
                       </DialogHeader>
                       <div className="space-y-4 py-4">
                         <div className="space-y-2">
-                          <Label htmlFor="space-code">Space Code</Label>
+                          <Label htmlFor="space-code">Space ID</Label>
                           <Input
                             id="space-code"
-                            placeholder="ABC123"
+                            placeholder="space_1234567890_abc123"
                             value={spaceCode}
-                            onChange={(e) => setSpaceCode(e.target.value.toUpperCase())}
+                            onChange={(e) => setSpaceCode(e.target.value)}
                             onKeyDown={(e) => {
                               if (e.key === "Enter") {
                                 handleJoinSpace()
                               }
                             }}
-                            maxLength={6}
-                            className="text-center text-lg font-mono tracking-widest"
+                            className="text-center text-sm font-mono"
                           />
                         </div>
                       </div>

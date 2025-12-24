@@ -7,13 +7,21 @@ import { getTile } from "@/lib/map/tileset";
 import { getVisibleObjects, getCollidableObjects } from "@/lib/world/worldObjects";
 import { checkUserObjectCollision } from "@/lib/world/WorldObject";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { ArrowLeft, Send } from "lucide-react";
 import { useWebSocket } from "@/contexts/WebSocketContext";
+import { useUser } from "@clerk/nextjs";
 
 interface User {
   userId: string;
   color: string;
   position: { x: number; y: number };
+}
+
+interface ChatMessage {
+  userId: string;
+  chat: string;
+  timestamp: number;
 }
 
 const MAP_WIDTH = 4000;
@@ -26,9 +34,8 @@ export default function SpacePage() {
   const params = useParams();
   const router = useRouter();
   const spaceId = params.spaceId as string;
-  
+  const { user } = useUser();
   const [users, setUsers] = useState<Map<string, User>>(new Map());
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [currentColor, setCurrentColor] = useState<string>("");
   const [spaceName, setSpaceName] = useState<string>("");
   const [position, setPosition] = useState({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
@@ -36,25 +43,41 @@ export default function SpacePage() {
   // Initialize with default values to avoid hydration mismatch
   const [viewportSize, setViewportSize] = useState({ width: 1200, height: 800 });
   const [isClient, setIsClient] = useState(false);
-  const { sendMessage, addMessageListener, isConnected, connectedUserInfo } = useWebSocket();
+  const [username, setUsername] = useState<string>("");
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState<string>("");
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+  const { sendMessage, addMessageListener, isConnected } = useWebSocket();
   const positionRef = useRef({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
   const keysPressedRef = useRef<Set<string>>(new Set());
   const animationFrameRef = useRef<number | null>(null);
   const lastUpdateTimeRef = useRef<number>(0);
   const lastStateUpdateTimeRef = useRef<number>(0);
   const lastCameraUpdateTimeRef = useRef<number>(0);
-  const currentUserIdRef = useRef<string | null>(null);
   const usersRef = useRef<Map<string, User>>(new Map());
   const hasJoinedSpaceRef = useRef(false);
   const cameraOffsetRef = useRef({ x: 0, y: 0 });
   const targetCameraOffsetRef = useRef({ x: 0, y: 0 });
   const collidableObjectsRef = useRef<ReturnType<typeof getCollidableObjects> | null>(null);
   const lastFrameTimeRef = useRef<number>(performance.now());
+  const currentUserIdRef = useRef<string | undefined>(user?.id);
 
   // Set client-side flag and initialize viewport size after mount
   useEffect(() => {
     setIsClient(true);
     setViewportSize({ width: window.innerWidth, height: window.innerHeight });
+    
+    // Get username from localStorage
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('metaverse_username');
+      if (stored) {
+        setUsername(stored);
+      } else {
+        const defaultUsername = `User${Math.floor(Math.random() * 10000)}`;
+        setUsername(defaultUsername);
+        localStorage.setItem('metaverse_username', defaultUsername);
+      }
+    }
     
     // Hide header navigation
     const header = document.querySelector('header');
@@ -76,185 +99,75 @@ export default function SpacePage() {
     };
   }, []);
 
-  // Initialize user info from context if available (handles case where connected message was received before component mount)
-  useEffect(() => {
-    if (connectedUserInfo && !currentUserIdRef.current) {
-      console.log("[SPACE_PAGE] Using connected user info from context:", connectedUserInfo);
-      currentUserIdRef.current = connectedUserInfo.userId;
-      setCurrentUserId(connectedUserInfo.userId);
-      setCurrentColor(connectedUserInfo.color);
-      
-      // Only set position if it exists (user may not have joined a space yet)
-      if (connectedUserInfo.position) {
-        positionRef.current = connectedUserInfo.position;
-        setPosition(connectedUserInfo.position);
-      }
-      
-      // If we're already in the correct space, we don't need to join again
-      if (connectedUserInfo.spaceId === spaceId) {
-        hasJoinedSpaceRef.current = true;
-      }
-    }
-  }, [connectedUserInfo, spaceId]);
 
   // Handle WebSocket messages
   useEffect(() => {
     if (!isClient || !spaceId) return;
 
-    const offConnected = addMessageListener("connected", (message) => {
-      const userId = message.userId;
-      const pos = message.position;
-      const connectedSpaceId = message.spaceId;
-      console.log("[CONNECTED] Setting current user:", userId, "position:", pos, "spaceId:", connectedSpaceId);
-      currentUserIdRef.current = userId;
-      setCurrentUserId(userId);
-      setCurrentColor(message.color);
-      
-      // Position may not be set yet if user hasn't joined a space
-      // Only update position if it's provided
-      if (pos && pos.x !== undefined && pos.y !== undefined) {
-        positionRef.current = pos;
-        setPosition(pos);
-      }
-      
-      // Only send joinSpace if we're not already in the correct space
-      if (!hasJoinedSpaceRef.current && connectedSpaceId !== spaceId) {
-        sendMessage(JSON.stringify({
-          type: "joinSpace",
-          spaceId: spaceId
-        }));
-        hasJoinedSpaceRef.current = true;
-      } else if (connectedSpaceId === spaceId) {
-        // Already in the correct space, mark as joined
-        hasJoinedSpaceRef.current = true;
-      }
-    });
-
-    // If already connected when component mounts, send joinSpace
-    // The connected message might have been received before this component mounted
-    // or it will come soon. Either way, we should try to join the space.
-    if (isConnected && !hasJoinedSpaceRef.current) {
-      // Small delay to allow connected message to be processed first if it's coming
-      const joinTimeout = setTimeout(() => {
-        if (!hasJoinedSpaceRef.current && isConnected) {
-          console.log("[SPACE_PAGE] Already connected, sending joinSpace");
-          sendMessage(JSON.stringify({
-            type: "joinSpace",
-            spaceId: spaceId
-          }));
-          hasJoinedSpaceRef.current = true;
-        }
-      }, 300);
-
-      return () => {
-        clearTimeout(joinTimeout);
-      };
+    // Join space when connected
+    if (isConnected && !hasJoinedSpaceRef.current && username) {
+      console.log("[SPACE_PAGE] Joining space:", spaceId);
+      sendMessage(JSON.stringify({
+        type: "JOIN_SPACE",
+        spaceId: spaceId,
+        username: username,
+        userId: user?.id
+      }));
+      hasJoinedSpaceRef.current = true;
     }
 
     const offSpaceJoined = addMessageListener("spaceJoined", (message) => {
       console.log("[SPACE_JOINED] Space joined:", message);
-      setSpaceName(message.name || "Space");
-      // Server automatically sends usersList when joining, no need to request
+      setSpaceName("Space"); // Space name is not returned by API, using default
+      // Set current user's color from JOIN_SPACE_RESPONSE
+      if (message.userColour) {
+        setCurrentColor(message.userColour);
+      }
     });
 
-    const offUserJoined = addMessageListener("userJoined", (message) => {
-      // Only process if this event is for the current space
-      if (message.spaceId !== spaceId && message.code) {
-        // If message has code but not spaceId, we can't verify, so skip
-        // (In practice, server sends spaceId, but we check both for safety)
+    // Handle player list from PLAYER_LIST message
+    const offPlayersList = addMessageListener("playersList", (message) => {
+      console.log("[PLAYERS_LIST] Received player list:", message.playerList);
+      
+      if (!Array.isArray(message.playerList)) {
+        console.warn("[PLAYERS_LIST] Invalid player list format");
         return;
       }
       
-      // Add other users - safety check to never add ourselves
-      const myUserId = currentUserIdRef.current;
-      
-      // Skip if this is definitely ourselves
-      if (myUserId && message.userId === myUserId) {
-        console.log("[USER_JOINED] Ignoring own userJoined message");
-        return;
-      }
-      
-      // Validate message has required fields
-      if (!message.userId || !message.color || !message.position) {
-        console.warn("[USER_JOINED] Invalid message format:", message);
-        return;
-      }
-      
-      console.log("[USER_JOINED] Adding user:", message.userId, "myUserId:", myUserId);
-      
-      setUsers((prev) => {
-        const newUsers = new Map(prev);
-        // Add user if it's not ourselves (or if we don't know our userId yet)
-        if (!myUserId || message.userId !== myUserId) {
-          newUsers.set(message.userId, {
-            userId: message.userId,
-            color: message.color,
-            position: message.position,
-          });
-          console.log("[USER_JOINED] User added to map. Total users:", newUsers.size);
-        } else {
-          console.log("[USER_JOINED] Skipped adding self");
-        }
-        return newUsers;
-      });
-    });
-
-    // Handle complete users list (sent when someone joins, ensures synchronization)
-    const offUsersList = addMessageListener("usersList", (message) => {
-      // Only process if this event is for the current space
-      if (message.spaceId !== spaceId && message.code) {
-        // If message has code but not spaceId, we can't verify, so skip
-        return;
-      }
-      
-      console.log("[USERS_LIST] Received users list:", message.users);
-      const myUserId = currentUserIdRef.current;
-      
-      if (!Array.isArray(message.users)) {
-        console.warn("[USERS_LIST] Invalid users list format");
-        return;
-      }
-      
-      console.log("[USERS_LIST] Total users in list:", message.users.length, "My userId:", myUserId);
-      
-      // Build users map from the list, excluding ourselves
+      // Build users map from the player list
+      // Note: PLAYER_LIST doesn't include positions, so we keep existing positions
       const newUsers = new Map<string, User>();
-      message.users.forEach((userData: any) => {
-        if (userData.userId && userData.color && userData.position) {
-          // If this is us, update our position (in case we didn't have it before)
-          if (myUserId && userData.userId === myUserId) {
-            console.log("[USERS_LIST] Found ourselves in list, updating position:", userData.position);
-            if (userData.position && userData.position.x !== undefined && userData.position.y !== undefined) {
-              positionRef.current = userData.position;
-              setPosition(userData.position);
-            }
-            console.log("[USERS_LIST] Skipped self:", userData.userId);
-          } else {
-            newUsers.set(userData.userId, {
-              userId: userData.userId,
-              color: userData.color,
-              position: userData.position,
-            });
-            console.log("[USERS_LIST] Added user to map:", userData.userId);
+      const existingUsers = usersRef.current;
+      
+      message.playerList.forEach((player: any) => {
+        if (player.userId) {
+          // Keep existing position if user already exists, otherwise use default
+          const existingUser = existingUsers.get(player.userId);
+          const defaultPosition = { x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 };
+          
+          // Use color from server (userColour field), fallback to existing color if not provided
+          const userColor = player.userColour || existingUser?.color || "#888888";
+          
+          // Set current user's color if this is the current user
+          if (player.userId === user?.id && player.userColour) {
+            setCurrentColor(player.userColour);
           }
-        } else {
-          console.warn("[USERS_LIST] Invalid user data:", userData);
+          
+          newUsers.set(player.userId, {
+            userId: player.userId,
+            color: userColor,
+            position: existingUser?.position || defaultPosition,
+          });
         }
       });
       
-      console.log("[USERS_LIST] Setting users map with", newUsers.size, "users (excluding self). Total count will be:", newUsers.size + (myUserId ? 1 : 0));
+      console.log("[PLAYERS_LIST] Setting users map with", newUsers.size, "users");
       setUsers(newUsers);
     });
 
     const offUserMoved = addMessageListener("userMoved", (message) => {
-      // Only process if this event is for the current space
-      if (message.spaceId !== spaceId && message.code) {
-        return;
-      }
-      
-      const myUserId = currentUserIdRef.current;
-      
-      if (message.userId === myUserId) {
+      if (!message.position || !message.userId) {
+        console.warn("[USER_MOVED] Invalid message format:", message);
         return;
       }
       
@@ -262,27 +175,43 @@ export default function SpacePage() {
         const newUsers = new Map(prev);
         const user = newUsers.get(message.userId);
         
-        if (user && user.userId !== myUserId) {
+        if (user) {
+          // Update existing user position and color if provided
           user.position = message.position;
+          if (message.userColour) {
+            user.color = message.userColour;
+          }
           newUsers.set(message.userId, user);
+        } else {
+          // User not in our list yet, add them with color from message or default
+          newUsers.set(message.userId, {
+            userId: message.userId,
+            color: message.userColour || "#888888", // Use color from server if available
+            position: message.position,
+          });
         }
         return newUsers;
       });
     });
 
-    const offUserLeft = addMessageListener("userLeft", (message) => {
-      // Only process if this event is for the current space
-      if (message.spaceId !== spaceId && message.code) {
+    const offChat = addMessageListener("chat", (message) => {
+      if (!message.chat || !message.userId) {
+        console.warn("[CHAT] Invalid message format:", message);
         return;
       }
       
-      console.log("[USER_LEFT] userId:", message.userId);
-      setUsers((prev) => {
-        const newUsers = new Map(prev);
-        newUsers.delete(message.userId);
-        return newUsers;
-      });
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          userId: message.userId,
+          chat: message.chat,
+          timestamp: Date.now(),
+        },
+      ]);
     });
+
+    // Note: User leaving is handled via PLAYER_LIST updates (when they're removed from the list)
+    // No separate userLeft event is sent by the API
 
     const offJoinSpaceError = addMessageListener("joinSpaceError", (message) => {
       console.error("[JOIN_SPACE_ERROR]", message.error);
@@ -291,28 +220,49 @@ export default function SpacePage() {
     });
 
     return () => {
-      offConnected();
       offSpaceJoined();
-      offUserJoined();
-      offUsersList();
+      offPlayersList();
       offUserMoved();
-      offUserLeft();
+      offChat();
       offJoinSpaceError();
       hasJoinedSpaceRef.current = false;
     };
-  }, [isClient, spaceId, router, addMessageListener, sendMessage, isConnected]);
+  }, [isClient, spaceId, router, addMessageListener, sendMessage, isConnected, username]);
 
   const sendPosition = useCallback((x: number, y: number) => {
-    if (isConnected && spaceId) {
+    if (isConnected && spaceId && user?.id) {
       sendMessage(
         JSON.stringify({
-          type: "move",
+          type: "MOVE",
+          userId: user.id,
           spaceId: spaceId, // Required for routing
           position: { x, y },
         })
       );
     }
-  }, [isConnected, sendMessage, spaceId]);
+  }, [isConnected, sendMessage, spaceId, user]);
+
+  const sendChat = useCallback(() => {
+    if (!chatInput.trim() || !isConnected || !spaceId || !user?.id) return;
+    
+    sendMessage(
+      JSON.stringify({
+        type: "SEND_CHAT",
+        userId: user.id,
+        spaceId: spaceId,
+        chat: chatInput.trim(),
+      })
+    );
+    
+    setChatInput("");
+  }, [chatInput, isConnected, spaceId, user, sendMessage]);
+
+  // Auto-scroll chat to bottom when new messages arrive
+  useEffect(() => {
+    if (chatContainerRef.current) {
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [chatMessages]);
 
   // Keep usersRef in sync with users state
   useEffect(() => {
@@ -326,16 +276,20 @@ export default function SpacePage() {
     }
   }, []);
 
+  // Keep currentUserIdRef in sync
+  useEffect(() => {
+    currentUserIdRef.current = user?.id;
+  }, [user?.id]);
+
   // Check collision with other users AND world objects
   const checkCollision = useCallback((newX: number, newY: number): boolean => {
-    const myUserId = currentUserIdRef.current;
-    
     // Check collision with other users (optimized - skip sqrt for distance check)
-    const allUsers = Array.from(usersRef.current.values());
+    // Exclude current user from collision check
+    const allUsers = Array.from(usersRef.current.values()).filter(
+      (u) => u.userId !== currentUserIdRef.current
+    );
     const collisionDistSq = COLLISION_DISTANCE * COLLISION_DISTANCE;
     for (const user of allUsers) {
-      if (user.userId === myUserId) continue;
-      
       const dx = newX - user.position.x;
       const dy = newY - user.position.y;
       const distanceSq = dx * dx + dy * dy;
@@ -385,7 +339,7 @@ export default function SpacePage() {
 
   // Smooth movement with animation frame and smooth camera following
   useEffect(() => {
-    if (!currentUserId || !isClient || !position) return;
+    if (!isClient) return;
 
     const moveUser = (currentTime: number) => {
       // Calculate delta time for frame-independent movement
@@ -426,11 +380,9 @@ export default function SpacePage() {
           
           const now = Date.now();
           
-          // Update state less frequently for React rendering (60fps)
-          if (now - lastStateUpdateTimeRef.current > 16) {
-            setPosition({ x: newX, y: newY });
-            lastStateUpdateTimeRef.current = now;
-          }
+          // Always update position state (React will handle throttling via requestAnimationFrame)
+          setPosition({ x: newX, y: newY });
+          lastStateUpdateTimeRef.current = now;
           
           // Send position to server less frequently (20fps)
           if (now - lastUpdateTimeRef.current > 50) {
@@ -486,14 +438,22 @@ export default function SpacePage() {
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [currentUserId, isClient, checkCollision, sendPosition, viewportSize.width, viewportSize.height]);
+  }, [isClient, checkCollision, sendPosition, viewportSize.width, viewportSize.height]);
 
   // Handle keyboard input
   useEffect(() => {
+    if (!isClient) return;
+
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Only handle arrow keys if not typing in an input field
+      const target = e.target as HTMLElement;
+      const isInputFocused = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+      
       if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
-        e.preventDefault();
-        keysPressedRef.current.add(e.key);
+        if (!isInputFocused) {
+          e.preventDefault();
+          keysPressedRef.current.add(e.key);
+        }
       }
     };
 
@@ -503,14 +463,14 @@ export default function SpacePage() {
       }
     };
 
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("keyup", handleKeyUp, true);
     
     return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("keyup", handleKeyUp, true);
     };
-  }, []);
+  }, [isClient]);
 
   // Calculate visible tiles for rendering
   const visibleTiles = useMemo(() => {
@@ -596,7 +556,7 @@ export default function SpacePage() {
 
         {/* LAYER 3: Players */}
         {/* Current user */}
-        {currentUserId && position && position.x !== undefined && position.y !== undefined && (
+        {position && position.x !== undefined && position.y !== undefined && (
           <div
             className="absolute rounded-full border-2 border-black dark:border-white"
             style={{
@@ -609,9 +569,9 @@ export default function SpacePage() {
             }}
           />
         )}
-        {/* Other users */}
+        {/* Other users - exclude current user to avoid duplicate rendering */}
         {Array.from(users.values())
-          .filter((user) => user.userId !== currentUserId)
+          .filter((u) => u.userId !== user?.id)
           .map((user) => (
             <div
               key={user.userId}
@@ -649,8 +609,81 @@ export default function SpacePage() {
             Use arrow keys to move. Your color: <span className="font-semibold" style={{ color: currentColor || '#888' }}>{currentColor || "connecting..."}</span>
           </p>
           <p className="text-xs text-foreground/70 mt-1">
-            Users online: {users.size + (currentUserId ? 1 : 0)}
+            Users online: {users.size}
           </p>
+        </div>
+      </div>
+
+      {/* Chat Section */}
+      <div className="absolute bottom-4 right-4 z-10 w-80 bg-background/90 backdrop-blur-sm border-2 border-border rounded-lg shadow-lg flex flex-col max-h-96">
+        {/* Chat Header */}
+        <div className="px-4 py-2 border-b border-border">
+          <h2 className="text-sm font-semibold text-foreground">Chat</h2>
+        </div>
+        
+        {/* Chat Messages */}
+        <div
+          ref={chatContainerRef}
+          className="flex-1 overflow-y-auto px-4 py-2 space-y-2 min-h-0"
+        >
+          {chatMessages.length === 0 ? (
+            <p className="text-xs text-muted-foreground text-center py-4">
+              No messages yet. Start chatting!
+            </p>
+          ) : (
+            chatMessages.map((msg, idx) => {
+              const userColor = users.get(msg.userId)?.color || "#888888";
+              const isCurrentUser = msg.userId === user?.id;
+              
+              return (
+                <div
+                  key={idx}
+                  className={`flex flex-col ${isCurrentUser ? 'items-end' : 'items-start'}`}
+                >
+                  <div
+                    className={`px-3 py-1.5 rounded-lg max-w-[80%] ${
+                      isCurrentUser
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted text-foreground'
+                    }`}
+                  >
+                    {!isCurrentUser && (
+                      <div
+                        className="text-xs font-semibold mb-1"
+                        style={{ color: userColor }}
+                      >
+                        User {msg.userId.slice(-4)}
+                      </div>
+                    )}
+                    <div className="text-sm">{msg.chat}</div>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+        
+        {/* Chat Input */}
+        <div className="px-4 py-2 border-t border-border flex gap-2">
+          <Input
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendChat();
+              }
+            }}
+            placeholder="Type a message..."
+            className="flex-1"
+          />
+          <Button
+            size="icon"
+            onClick={sendChat}
+            disabled={!chatInput.trim() || !isConnected}
+          >
+            <Send className="size-4" />
+          </Button>
         </div>
       </div>
     </div>

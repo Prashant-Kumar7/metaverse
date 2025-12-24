@@ -7,6 +7,20 @@ interface User {
     status : "Idle" | "InSpace"
 }
 
+/**
+ * Generates a random hex color
+ * @returns A random hex color string (e.g., "#FF5733")
+ */
+function generateRandomColor(): string {
+    // Generate a random color with good visibility (avoiding very dark colors)
+    const letters = '0123456789ABCDEF';
+    let color = '#';
+    for (let i = 0; i < 6; i++) {
+        color += letters[Math.floor(Math.random() * 16)];
+    }
+    return color;
+}
+
 export class UserManager {
     // private rooms : 
     private spaces : Map<string, SpaceManager>;
@@ -98,9 +112,13 @@ export class UserManager {
             
             switch(message.type){
                 case "CREATE_SPACE": {
-                    const space = new SpaceManager(socket, message.spaceId, message.userId, message.spaceName, message.username)
+                    // Always assign color server-side (ignore any color from client)
+                    // Color will be assigned in SpaceManager constructor
+                    const space = new SpaceManager(socket, message.spaceId, message.userId, message.spaceName, message.username, "")
                     this.spaces.set(message.spaceId, space)
-                    socket.send(JSON.stringify({type : "CREATE_SPACE_RESPONSE", status : true, message : "You have created the space successfully", spaceId : message.spaceId}))
+                    // Get the assigned color using the helper method
+                    const assignedColor = space.getUserColour(message.userId);
+                    socket.send(JSON.stringify({type : "CREATE_SPACE_RESPONSE", status : true, message : "You have created the space successfully", spaceId : message.spaceId, userColour : assignedColor }))
                     console.log("this is the space created", space)
                     break;
                 }
@@ -126,16 +144,16 @@ export class UserManager {
                     break;
                 }
 
-                case "GET_JOIN_EVENTS": {
-                    const space = this.spaces.get(message.spaceId);
-                    if(space && space instanceof SpaceManager){
-                        space.getJoinEvents(socket, message)
-                    } else {
-                        socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : false, message : "Space not found", spaceId : message.spaceId}))
-                        socket.send(JSON.stringify({type : "SPACE_NOT_FOUND"}))
-                    }
-                    break;
-                }
+                // case "GET_JOIN_EVENTS": {
+                //     const space = this.spaces.get(message.spaceId);
+                //     if(space && space instanceof SpaceManager){
+                //         space.getJoinEvents(socket, message)
+                //     } else {
+                //         socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : false, message : "Space not found", spaceId : message.spaceId}))
+                //         socket.send(JSON.stringify({type : "SPACE_NOT_FOUND"}))
+                //     }
+                //     break;
+                // }
     
                 case "SEND_CHAT": {
                     const space = this.spaces.get(message.spaceId);

@@ -67,7 +67,7 @@ export default function Home() {
     <div className="min-h-screen bg-background">
       {/* Hero Section */}
       <section className="relative overflow-hidden border-b">
-        <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-background to-background" />
+        <div className="absolute inset-0 bg-linear-to-br from-primary/5 via-background to-background" />
         <div className="container relative mx-auto px-4 py-24 md:py-32">
           <div className="mx-auto max-w-3xl text-center">
             <div className="mb-6 flex justify-center">
@@ -77,7 +77,7 @@ export default function Home() {
             </div>
             <h1 className="mb-6 text-5xl font-bold tracking-tight md:text-6xl lg:text-7xl">
               Welcome to the
-              <span className="bg-gradient-to-r from-primary to-primary/60 bg-clip-text text-transparent">
+              <span className="bg-linear-to-r from-primary to-primary/60 bg-clip-text text-transparent">
                 {" "}
                 Metaverse
               </span>
@@ -186,7 +186,7 @@ export default function Home() {
 
       {/* CTA Section */}
       <section className="container mx-auto px-4 py-24">
-        <Card className="border-2 border-primary/20 bg-gradient-to-br from-primary/5 to-background">
+        <Card className="border-2 border-primary/20 bg-linear-to-br from-primary/5 to-background">
           <CardContent className="px-8 py-16 text-center">
             <h2 className="mb-4 text-4xl font-bold tracking-tight">Ready to Get Started?</h2>
             <p className="mb-8 mx-auto max-w-2xl text-lg text-muted-foreground">

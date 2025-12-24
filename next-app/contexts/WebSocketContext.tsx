@@ -1,30 +1,18 @@
 "use client";
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
-import { useUser } from "@clerk/nextjs";
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8080";
-
-interface ConnectedUserInfo {
-  userId: string;
-  color: string;
-  position?: { x: number; y: number };
-  spaceId: string | null;
-}
 
 interface WebSocketContextType {
   sendMessage: (message: string) => void;
   addMessageListener: (type: string, callback: (data: any) => void) => () => void;
   isConnected: boolean;
-  disconnect: () => void;
-  connectedUserInfo: ConnectedUserInfo | null;
 }
 
 const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
 
 export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { user } = useUser();
-  const userIdRef = useRef<string | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const messageListeners = useRef<Map<string, Set<(data: any) => void>>>(new Map());
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -33,12 +21,6 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const baseReconnectDelay = 1000; // 1 second
   const [, forceRender] = useState({}); // To trigger re-renders when needed
   const [isConnected, setIsConnected] = useState(false);
-  const [connectedUserInfo, setConnectedUserInfo] = useState<ConnectedUserInfo | null>(null);
-
-  // Keep userId ref updated
-  useEffect(() => {
-    userIdRef.current = user?.id || null;
-  }, [user?.id]);
 
   const connect = useCallback(() => {
     if (socketRef.current?.readyState === WebSocket.OPEN || 
@@ -61,7 +43,6 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     ws.onclose = (event) => {
       console.log("WebSocket Disconnected", event.code, event.reason);
       setIsConnected(false);
-      setConnectedUserInfo(null); // Clear user info on disconnect
       
       // Don't reconnect if it was a clean close (code 1000) or if we've exceeded max attempts
       if (event.code === 1000 || reconnectAttemptsRef.current >= maxReconnectAttempts) {
@@ -82,7 +63,6 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     ws.onerror = (error) => {
       console.error("WebSocket Error", error);
       setIsConnected(false);
-      setConnectedUserInfo(null); // Clear user info on error
     };
 
     ws.onmessage = (event) => {
@@ -108,20 +88,111 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         }
 
         const type = data.type;
-        // Handle ping messages silently (if needed in future)
-        if (type === 'ping') {
+        // Handle ping/pong messages silently
+        if (type === 'PING' || type === 'ping') {
           return;
         }
 
-        // Store connected user info when received
-        // Note: position and spaceId may be null initially (user hasn't joined a space yet)
-        if (type === 'connected' && data.userId && data.color) {
-          setConnectedUserInfo({
+        // Handle API responses - convert to frontend message format
+        if (type === 'CREATE_SPACE_RESPONSE') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'spaceCreated',
+            spaceId: data.spaceId,
+            status: data.status,
+            message: data.message
+          };
+          if (messageListeners.current.has('spaceCreated')) {
+            messageListeners.current.get('spaceCreated')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
+        }
+
+        if (type === 'JOIN_SPACE_RESPONSE') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'spaceJoined',
+            spaceId: data.spaceId,
+            status: data.status,
+            message: data.message,
+            userColour: data.userColour // Include color from server
+          };
+          if (messageListeners.current.has('spaceJoined')) {
+            messageListeners.current.get('spaceJoined')?.forEach(callback => callback(frontendMessage));
+          }
+          // Also trigger error handler if status is false
+          if (!data.status && messageListeners.current.has('joinSpaceError')) {
+            messageListeners.current.get('joinSpaceError')?.forEach(callback => callback({
+              type: 'joinSpaceError',
+              error: data.message || 'Failed to join space'
+            }));
+          }
+          return;
+        }
+
+        if (type === 'PLAYER_LIST') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'playersList',
+            playerList: data.playerList || []
+          };
+          if (messageListeners.current.has('playersList')) {
+            messageListeners.current.get('playersList')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
+        }
+
+        if (type === 'QUICK_JOIN_RESPONSE') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'quickJoinSpaceResponse',
+            status: data.status,
+            spaceId: data.spaceId,
+            message: data.message
+          };
+          if (messageListeners.current.has('quickJoinSpaceResponse')) {
+            messageListeners.current.get('quickJoinSpaceResponse')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
+        }
+
+        if (type === 'SPACE_NOT_FOUND') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'joinSpaceError',
+            error: 'Space not found'
+          };
+          if (messageListeners.current.has('joinSpaceError')) {
+            messageListeners.current.get('joinSpaceError')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
+        }
+
+        if (type === 'MOVE') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'userMoved',
             userId: data.userId,
-            color: data.color,
-            position: data.position || undefined,
-            spaceId: data.spaceId || null
-          });
+            position: data.position,
+            userColour: data.userColour // Include color from server
+          };
+          if (messageListeners.current.has('userMoved')) {
+            messageListeners.current.get('userMoved')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
+        }
+
+        if (type === 'CHAT') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'chat',
+            userId: data.userId,
+            chat: data.chat
+          };
+          if (messageListeners.current.has('chat')) {
+            messageListeners.current.get('chat')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
         }
 
         // console.log("WebSocket Message", data);
@@ -177,17 +248,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   }, []);
 
-  const disconnect = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-    }
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.close(1000, "App closing");
-    }
-  }, []);
-
   return (
-    <WebSocketContext.Provider value={{ sendMessage, addMessageListener, isConnected, disconnect, connectedUserInfo }}>
+    <WebSocketContext.Provider value={{ sendMessage, addMessageListener, isConnected }}>
       {children}
     </WebSocketContext.Provider>
   );
