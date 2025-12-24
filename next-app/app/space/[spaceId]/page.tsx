@@ -123,6 +123,14 @@ export default function SpacePage() {
       if (message.userColour) {
         setCurrentColor(message.userColour);
       }
+      // Set initial position from server if provided
+      if (message.position) {
+        console.log("[SPACE_JOINED] Setting initial position:", message.position);
+        positionRef.current = message.position;
+        setPosition(message.position);
+      } else {
+        console.warn("[SPACE_JOINED] No position received from server, using default");
+      }
     });
 
     // Handle player list from PLAYER_LIST message
@@ -136,22 +144,27 @@ export default function SpacePage() {
       
       // Build users map from the player list
       // Note: PLAYER_LIST doesn't include positions, so we keep existing positions
+      // IMPORTANT: Exclude current user from users map - they're rendered separately
       const newUsers = new Map<string, User>();
       const existingUsers = usersRef.current;
       
       message.playerList.forEach((player: any) => {
         if (player.userId) {
+          // Skip current user - they're rendered separately with position/currentColor state
+          if (player.userId === user?.id) {
+            // Just update current user's color if needed
+            if (player.userColour) {
+              setCurrentColor(player.userColour);
+            }
+            return; // Don't add current user to users map
+          }
+          
           // Keep existing position if user already exists, otherwise use default
           const existingUser = existingUsers.get(player.userId);
           const defaultPosition = { x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 };
           
           // Use color from server (userColour field), fallback to existing color if not provided
           const userColor = player.userColour || existingUser?.color || "#888888";
-          
-          // Set current user's color if this is the current user
-          if (player.userId === user?.id && player.userColour) {
-            setCurrentColor(player.userColour);
-          }
           
           newUsers.set(player.userId, {
             userId: player.userId,
@@ -219,15 +232,62 @@ export default function SpacePage() {
       router.push("/dashboard");
     });
 
+    // Handle initial user positions when joining
+    const offUserPositions = addMessageListener("userPositions", (message) => {
+      console.log("[USER_POSITIONS] Received positions:", message.positions);
+      if (!Array.isArray(message.positions)) {
+        console.warn("[USER_POSITIONS] Invalid positions format");
+        return;
+      }
+      
+      setUsers((prev) => {
+        const newUsers = new Map(prev);
+        message.positions.forEach((pos: any) => {
+          if (pos.userId && pos.position) {
+            // Skip current user - they use position state, not users map
+            if (pos.userId === user?.id) {
+              return;
+            }
+            
+            const existingUser = newUsers.get(pos.userId);
+            if (existingUser) {
+              // Update position for existing user
+              existingUser.position = pos.position;
+              newUsers.set(pos.userId, existingUser);
+            } else {
+              // Add new user with position - color will come from PLAYER_LIST
+              newUsers.set(pos.userId, {
+                userId: pos.userId,
+                color: "#888888", // Default color, will be updated by PLAYER_LIST
+                position: pos.position,
+              });
+            }
+          }
+        });
+        return newUsers;
+      });
+    });
+
     return () => {
+      // Send leave message when component unmounts
+      if (isConnected && spaceId && user?.id && hasJoinedSpaceRef.current) {
+        console.log("[SPACE_PAGE] Leaving space:", spaceId);
+        sendMessage(JSON.stringify({
+          type: "LEAVE_SPACE",
+          spaceId: spaceId,
+          userId: user.id
+        }));
+      }
+      
       offSpaceJoined();
       offPlayersList();
       offUserMoved();
       offChat();
       offJoinSpaceError();
+      offUserPositions();
       hasJoinedSpaceRef.current = false;
     };
-  }, [isClient, spaceId, router, addMessageListener, sendMessage, isConnected, username]);
+  }, [isClient, spaceId, router, addMessageListener, sendMessage, isConnected, username, user?.id]);
 
   const sendPosition = useCallback((x: number, y: number) => {
     if (isConnected && spaceId && user?.id) {
@@ -288,15 +348,35 @@ export default function SpacePage() {
     const allUsers = Array.from(usersRef.current.values()).filter(
       (u) => u.userId !== currentUserIdRef.current
     );
+    
+    // If no other users, no collision
+    if (allUsers.length === 0) {
+      return false;
+    }
+    
     const collisionDistSq = COLLISION_DISTANCE * COLLISION_DISTANCE;
+    let validUserCount = 0;
+    
     for (const user of allUsers) {
+      // Skip users without valid positions
+      if (!user.position || user.position.x === undefined || user.position.y === undefined) {
+        continue;
+      }
+      
+      validUserCount++;
       const dx = newX - user.position.x;
       const dy = newY - user.position.y;
       const distanceSq = dx * dx + dy * dy;
       
-      if (distanceSq < collisionDistSq) {
+      // Use a more lenient collision check (1.1x) to allow easier movement
+      if (distanceSq < collisionDistSq * 1.1) {
         return true;
       }
+    }
+    
+    // If we have users but none have valid positions yet, allow movement
+    if (validUserCount === 0) {
+      return false;
     }
     
     // Check collision with world objects (use cached list)
@@ -373,9 +453,11 @@ export default function SpacePage() {
       }
 
       if (moved) {
+        // Check collision
         const hasCollision = checkCollision(newX, newY);
         
         if (!hasCollision) {
+          // No collision, move normally
           positionRef.current = { x: newX, y: newY };
           
           const now = Date.now();
@@ -390,6 +472,8 @@ export default function SpacePage() {
             lastUpdateTimeRef.current = now;
           }
         }
+        // If collision detected, don't move - this prevents getting stuck
+        // The user will need to move in a different direction
       }
 
       // Smooth camera following - calculate target camera position
@@ -555,9 +639,10 @@ export default function SpacePage() {
         ))}
 
         {/* LAYER 3: Players */}
-        {/* Current user */}
-        {position && position.x !== undefined && position.y !== undefined && (
+        {/* Current user - rendered separately with position/currentColor state */}
+        {position && position.x !== undefined && position.y !== undefined && currentColor && (
           <div
+            key="current-user"
             className="absolute rounded-full border-2 border-black dark:border-white"
             style={{
               left: position.x,
@@ -566,13 +651,12 @@ export default function SpacePage() {
               height: USER_RADIUS * 2,
               backgroundColor: currentColor,
               transform: "translate(-50%, -50%)",
+              zIndex: 10, // Ensure current user is on top
             }}
           />
         )}
-        {/* Other users - exclude current user to avoid duplicate rendering */}
-        {Array.from(users.values())
-          .filter((u) => u.userId !== user?.id)
-          .map((user) => (
+        {/* Other users - current user should NOT be in users map */}
+        {Array.from(users.values()).map((user) => (
             <div
               key={user.userId}
               className="absolute rounded-full border-2 border-black dark:border-white"

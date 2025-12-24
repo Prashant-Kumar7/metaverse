@@ -115,7 +115,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
             spaceId: data.spaceId,
             status: data.status,
             message: data.message,
-            userColour: data.userColour // Include color from server
+            userColour: data.userColour, // Include color from server
+            position: data.position // Include initial position from server
           };
           if (messageListeners.current.has('spaceJoined')) {
             messageListeners.current.get('spaceJoined')?.forEach(callback => callback(frontendMessage));
@@ -191,6 +192,18 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           };
           if (messageListeners.current.has('chat')) {
             messageListeners.current.get('chat')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
+        }
+
+        if (type === 'USER_POSITIONS') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'userPositions',
+            positions: data.positions || []
+          };
+          if (messageListeners.current.has('userPositions')) {
+            messageListeners.current.get('userPositions')?.forEach(callback => callback(frontendMessage));
           }
           return;
         }

@@ -29,13 +29,22 @@ function generateRandomColor(): string {
     return color;
 }
 
+interface UserPosition {
+    userId: string;
+    position: { x: number; y: number };
+}
+
 export class SpaceManager {
     private host : Host;
     private participants : Participant;
     public spaceId : string;
     private spaceName : string;
     private playerList : Player[];
-    
+    private userPositions : Map<string, { x: number; y: number }>;
+    private readonly MAP_WIDTH = 4000;
+    private readonly MAP_HEIGHT = 4000;
+    private readonly USER_RADIUS = 15;
+    private readonly COLLISION_DISTANCE = 30; // USER_RADIUS * 2
 
     constructor(socket : WebSocket, spaceId : string, userId : string, spaceName : string, username : string, userColour : string){
         this.spaceId = spaceId;
@@ -47,9 +56,80 @@ export class SpaceManager {
         this.participants = {
             [this.host.userId] : this.host.socket
         }
+        this.userPositions = new Map();
         // Always assign color server-side (ignore any color from client)
         const assignedColor = generateRandomColor();
         this.playerList = [{ userId: this.host.userId, username: username, userColour : assignedColor }]
+        // Set initial position for host (center of map)
+        this.userPositions.set(this.host.userId, { x: this.MAP_WIDTH / 2, y: this.MAP_HEIGHT / 2 });
+    }
+
+    private findAvailablePosition(): { x: number; y: number } {
+        // Try to find a position that doesn't collide with existing users
+        const centerX = this.MAP_WIDTH / 2;
+        const centerY = this.MAP_HEIGHT / 2;
+        const minDistance = this.COLLISION_DISTANCE * 3; // Increased spacing
+        
+        // Start from a minimum radius to avoid center collisions
+        const startRadius = this.COLLISION_DISTANCE * 2;
+        
+        // Try positions in a spiral pattern around center
+        for (let radius = startRadius; radius < 1000; radius += minDistance) {
+            for (let angle = 0; angle < 360; angle += 20) { // More angles for better coverage
+                const rad = (angle * Math.PI) / 180;
+                const x = centerX + radius * Math.cos(rad);
+                const y = centerY + radius * Math.sin(rad);
+                
+                // Clamp to map bounds
+                const clampedX = Math.max(this.USER_RADIUS, Math.min(x, this.MAP_WIDTH - this.USER_RADIUS));
+                const clampedY = Math.max(this.USER_RADIUS, Math.min(y, this.MAP_HEIGHT - this.USER_RADIUS));
+                
+                // Check if this position collides with any existing user
+                let hasCollision = false;
+                for (const [userId, pos] of this.userPositions.entries()) {
+                    const dx = clampedX - pos.x;
+                    const dy = clampedY - pos.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    if (distance < this.COLLISION_DISTANCE * 1.5) { // Slightly more lenient check
+                        hasCollision = true;
+                        break;
+                    }
+                }
+                
+                if (!hasCollision) {
+                    return { x: clampedX, y: clampedY };
+                }
+            }
+        }
+        
+        // Fallback: random position with better spacing if spiral search fails
+        let attempts = 0;
+        while (attempts < 50) {
+            const x = this.USER_RADIUS + Math.random() * (this.MAP_WIDTH - this.USER_RADIUS * 2);
+            const y = this.USER_RADIUS + Math.random() * (this.MAP_HEIGHT - this.USER_RADIUS * 2);
+            
+            let hasCollision = false;
+            for (const [userId, pos] of this.userPositions.entries()) {
+                const dx = x - pos.x;
+                const dy = y - pos.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                if (distance < this.COLLISION_DISTANCE * 1.5) {
+                    hasCollision = true;
+                    break;
+                }
+            }
+            
+            if (!hasCollision) {
+                return { x, y };
+            }
+            attempts++;
+        }
+        
+        // Last resort: far from center
+        return {
+            x: this.MAP_WIDTH * 0.75,
+            y: this.MAP_HEIGHT * 0.75
+        };
     }
 
     joinSpace(socket : WebSocket, message : any){
@@ -73,6 +153,11 @@ export class SpaceManager {
         // Always assign color server-side (ignore any color from client)
         const assignedColor = generateRandomColor();
         this.playerList.push({ userId: message.userId, username: message.username || "", userColour : assignedColor })
+        
+        // Assign a position that doesn't collide with existing users
+        const initialPosition = this.findAvailablePosition();
+        this.userPositions.set(message.userId, initialPosition);
+        
         this.sendJoinSpaceEvents(socket, message.userId, false, assignedColor)
     }
 
@@ -95,11 +180,42 @@ export class SpaceManager {
     
     sendJoinSpaceEvents(socket: WebSocket, userId: string, isReconnect: boolean = false, userColour : string) {
         if (isReconnect) {
-            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : true, message : "You are already in the space", spaceId : this.spaceId, userColour : userColour}))
+            const userPosition = this.userPositions.get(userId);
+            socket.send(JSON.stringify({
+                type : "JOIN_SPACE_RESPONSE", 
+                status : true, 
+                message : "You are already in the space", 
+                spaceId : this.spaceId, 
+                userColour : userColour,
+                position: userPosition || { x: this.MAP_WIDTH / 2, y: this.MAP_HEIGHT / 2 }
+            }))
         } else {
-            socket.send(JSON.stringify({type : "JOIN_SPACE_RESPONSE", status : true, message : "You have joined the space successfully", spaceId : this.spaceId, userColour : userColour}))
+            const userPosition = this.userPositions.get(userId);
+            if (!userPosition) {
+                console.error(`[SpaceManager] No position found for user ${userId} when sending join events`);
+            }
+            console.log(`[SpaceManager] Sending position to user ${userId}:`, userPosition);
+            socket.send(JSON.stringify({
+                type : "JOIN_SPACE_RESPONSE", 
+                status : true, 
+                message : "You have joined the space successfully", 
+                spaceId : this.spaceId, 
+                userColour : userColour,
+                position: userPosition || { x: this.MAP_WIDTH / 2, y: this.MAP_HEIGHT / 2 }
+            }))
         }
         // socket.send(JSON.stringify({type : "room_state", roomState : this.roomState}))
+        
+        // Send all existing user positions to the newly joined user
+        const allPositions: UserPosition[] = [];
+        this.userPositions.forEach((position, uid) => {
+            if (uid !== userId) { // Don't send the new user's own position
+                allPositions.push({ userId: uid, position });
+            }
+        });
+        if (allPositions.length > 0) {
+            socket.send(JSON.stringify({type : "USER_POSITIONS", positions : allPositions}))
+        }
         
         // Broadcast updated player list to all players
         this.playerList.forEach(player => {
@@ -107,6 +223,24 @@ export class SpaceManager {
                 this.participants[player.userId]?.send(JSON.stringify({type : "PLAYER_LIST", playerList : this.playerList}))
             }
         })
+        
+        // If this is a new user joining (not reconnecting), send their position to all existing users
+        if (!isReconnect) {
+            const newUserPosition = this.userPositions.get(userId);
+            if (newUserPosition) {
+                const newUserColour = this.getUserColour(userId);
+                // Send new user's position to all existing users
+                this.playerList.forEach(player => {
+                    if (player.userId !== userId && this.participants[player.userId]) {
+                        // Send as USER_POSITIONS message so existing users can add the new user
+                        this.participants[player.userId]?.send(JSON.stringify({
+                            type : "USER_POSITIONS", 
+                            positions : [{ userId: userId, position: newUserPosition }]
+                        }))
+                    }
+                })
+            }
+        }
     }
 
     sendJoinSpaceFailure(socket: WebSocket, reason: "full" | "not_found") {
@@ -123,6 +257,11 @@ export class SpaceManager {
     }
 
     move(socket : WebSocket, message : any){
+        // Update position on server
+        if (message.position && message.userId) {
+            this.userPositions.set(message.userId, message.position);
+        }
+        
         // Find the moving user's color from playerList
         const userColour = this.getUserColour(message.userId);
         
@@ -136,5 +275,28 @@ export class SpaceManager {
                 }))
             }
         })
-    }  
+    }
+
+    leaveSpace(userId: string) {
+        // Remove user from player list
+        this.playerList = this.playerList.filter(p => p.userId !== userId);
+        
+        // Remove user from participants
+        delete this.participants[userId];
+        
+        // Remove user position
+        this.userPositions.delete(userId);
+        
+        // Broadcast updated player list to remaining players
+        this.playerList.forEach(player => {
+            if (this.participants[player.userId]) {
+                this.participants[player.userId]?.send(JSON.stringify({
+                    type : "PLAYER_LIST", 
+                    playerList : this.playerList
+                }))
+            }
+        })
+        
+        console.log(`[SpaceManager] User ${userId} left space ${this.spaceId}. Remaining players: ${this.playerList.length}`);
+    }
 }

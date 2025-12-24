@@ -175,6 +175,14 @@ export class UserManager {
                     break;
                 }
 
+                case "LEAVE_SPACE": {
+                    const space = this.spaces.get(message.spaceId);
+                    if(space && space instanceof SpaceManager){
+                        space.leaveSpace(message.userId)
+                    }
+                    break;
+                }
+
                 default:
                     console.warn("Unhandled message type:", message.type);
                     break;
