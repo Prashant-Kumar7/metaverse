@@ -107,10 +107,13 @@ export function WebRTCVideoChatModal({
       }
     };
 
-    // Use onnegotiationneeded to create offer (like the working code)
+    // Use onnegotiationneeded to create offer - only if we should initiate (lower userId creates offer)
     pc.onnegotiationneeded = () => {
       console.log(`[WebRTC] onnegotiationneeded triggered for ${targetUserId}`);
-      if (pc.signalingState === "stable") {
+      // Only create offer if current user's ID is less than target user's ID (deterministic)
+      // This prevents both users from creating offers simultaneously
+      if (pc.signalingState === "stable" && currentUserId < targetUserId) {
+        console.log(`[WebRTC] Current user (${currentUserId}) should create offer for ${targetUserId}`);
         pc.createOffer()
           .then((offer) => {
             return pc.setLocalDescription(offer);
@@ -131,6 +134,8 @@ export function WebRTCVideoChatModal({
           .catch((error) => {
             console.error(`[WebRTC] Error in onnegotiationneeded for ${targetUserId}:`, error);
           });
+      } else if (currentUserId >= targetUserId) {
+        console.log(`[WebRTC] Waiting for offer from ${targetUserId} (they have lower ID)`);
       }
     };
 
@@ -172,7 +177,7 @@ export function WebRTCVideoChatModal({
 
     peerConnectionsRef.current.set(targetUserId, pc);
     return pc;
-  }, [spaceId, sendMessage]);
+  }, [spaceId, sendMessage, currentUserId]);
 
   // Initialize local stream when modal opens
   useEffect(() => {
@@ -197,12 +202,44 @@ export function WebRTCVideoChatModal({
       if (!isMounted || !localStreamRef.current) return;
 
       // Create peer connections for all users in proximity
-      // The onnegotiationneeded event will trigger offer creation
+      // The onnegotiationneeded event will trigger offer creation (only for lower userId)
       userIds.forEach((targetUserId) => {
         if (targetUserId !== currentUserId && !peerConnectionsRef.current.has(targetUserId)) {
           console.log(`[WebRTC] Creating peer connection for ${targetUserId}`);
           const pc = createPeerConnection(targetUserId);
           // onnegotiationneeded will fire automatically after addTrack
+          // Only the user with lower userId will create the offer
+          // The other user will wait to receive the offer
+          
+          // Explicitly create offer if we should initiate (in case onnegotiationneeded doesn't fire)
+          if (currentUserId < targetUserId && localStreamRef.current) {
+            // Wait a bit for tracks to be added, then create offer if still needed
+            setTimeout(() => {
+              if (pc.signalingState === "stable" && !pc.localDescription) {
+                console.log(`[WebRTC] Explicitly creating offer for ${targetUserId} (backup)`);
+                pc.createOffer()
+                  .then((offer) => {
+                    return pc.setLocalDescription(offer);
+                  })
+                  .then(() => {
+                    if (pc.localDescription) {
+                      sendMessage(
+                        JSON.stringify({
+                          type: "createOffer",
+                          spaceId: spaceId,
+                          targetUserId: targetUserId,
+                          offer: pc.localDescription,
+                        })
+                      );
+                      console.log(`[WebRTC] Explicit offer sent to ${targetUserId}`);
+                    }
+                  })
+                  .catch((error) => {
+                    console.error(`[WebRTC] Error creating explicit offer for ${targetUserId}:`, error);
+                  });
+              }
+            }, 100);
+          }
         }
       });
     };
@@ -226,23 +263,30 @@ export function WebRTCVideoChatModal({
         newUserIds.forEach((targetUserId: string) => {
           if (!peerConnectionsRef.current.has(targetUserId)) {
             const pc = createPeerConnection(targetUserId);
-            pc.createOffer()
-              .then((offer) => {
-                return pc.setLocalDescription(offer).then(() => offer);
-              })
-              .then((offer) => {
-                sendMessage(
-                  JSON.stringify({
-                    type: "createOffer",
-                    spaceId: spaceId,
-                    targetUserId: targetUserId,
-                    offer: offer,
-                  })
-                );
-              })
-              .catch((error) => {
-                console.error(`[WebRTC] Error creating offer for ${targetUserId} in webrtc_connected:`, error);
-              });
+            // Only create offer if current user has lower userId (deterministic)
+            // Otherwise wait for the other user to create the offer
+            if (currentUserId < targetUserId) {
+              console.log(`[WebRTC] Creating explicit offer for ${targetUserId} (we have lower ID)`);
+              pc.createOffer()
+                .then((offer) => {
+                  return pc.setLocalDescription(offer).then(() => offer);
+                })
+                .then((offer) => {
+                  sendMessage(
+                    JSON.stringify({
+                      type: "createOffer",
+                      spaceId: spaceId,
+                      targetUserId: targetUserId,
+                      offer: offer,
+                    })
+                  );
+                })
+                .catch((error) => {
+                  console.error(`[WebRTC] Error creating offer for ${targetUserId} in webrtc_connected:`, error);
+                });
+            } else {
+              console.log(`[WebRTC] Waiting for offer from ${targetUserId} (they have lower ID)`);
+            }
           }
         });
       }
