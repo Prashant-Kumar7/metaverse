@@ -43,6 +43,7 @@ export function WebRTCVideoChatModal({
   const localStreamRef = useRef<MediaStream | null>(null);
   const iceCandidateQueueRef = useRef<Map<string, RTCIceCandidate[]>>(new Map());
   const remoteDescriptionSetRef = useRef<Map<string, boolean>>(new Map());
+  const remoteStreamsSetRef = useRef<Map<string, MediaStream>>(new Map());
 
   // Initialize local video stream
   const initializeLocalStream = useCallback(async () => {
@@ -134,6 +135,15 @@ export function WebRTCVideoChatModal({
     // Handle remote stream
     pc.ontrack = (event) => {
       const remoteStream = event.streams[0];
+      
+      // Prevent flickering by checking if we've already set this stream
+      const existingStream = remoteStreamsSetRef.current.get(targetUserId);
+      if (existingStream === remoteStream) {
+        return; // Already set, skip to prevent flickering
+      }
+      
+      remoteStreamsSetRef.current.set(targetUserId, remoteStream);
+      
       setPeerConnections((prev) => {
         const newMap = new Map(prev);
         const existing = newMap.get(targetUserId);
@@ -149,9 +159,9 @@ export function WebRTCVideoChatModal({
         return newMap;
       });
 
-      // Update remote video element
+      // Update remote video element - only if it's different to prevent flickering
       const videoElement = remoteVideosRef.current.get(targetUserId);
-      if (videoElement) {
+      if (videoElement && videoElement.srcObject !== remoteStream) {
         videoElement.srcObject = remoteStream;
         videoElement.play().catch(console.error);
       }
@@ -487,6 +497,7 @@ export function WebRTCVideoChatModal({
       peerConnectionsRef.current.clear();
       iceCandidateQueueRef.current.clear();
       remoteDescriptionSetRef.current.clear();
+      remoteStreamsSetRef.current.clear();
       setPeerConnections(new Map());
 
       // Stop local stream
@@ -555,9 +566,9 @@ export function WebRTCVideoChatModal({
   const setRemoteVideoRef = (userId: string, element: HTMLVideoElement | null) => {
     if (element) {
       remoteVideosRef.current.set(userId, element);
-      // If we already have a stream for this user, set it
+      // If we already have a stream for this user, set it (only if different to prevent flickering)
       const peerConn = peerConnections.get(userId);
-      if (peerConn?.remoteStream) {
+      if (peerConn?.remoteStream && element.srcObject !== peerConn.remoteStream) {
         element.srcObject = peerConn.remoteStream;
         element.play().catch(console.error);
       }
