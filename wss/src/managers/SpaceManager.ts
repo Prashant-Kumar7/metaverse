@@ -1,4 +1,5 @@
 import WebSocket from "ws";
+import { ProximityManager } from "./ProximityManager.js";
 
 interface Host{
     socket : WebSocket,
@@ -41,6 +42,7 @@ export class SpaceManager {
     private spaceName : string;
     private playerList : Player[];
     private userPositions : Map<string, { x: number; y: number }>;
+    private proximityManager : ProximityManager;
     private readonly MAP_WIDTH = 4000;
     private readonly MAP_HEIGHT = 4000;
     private readonly USER_RADIUS = 15;
@@ -57,6 +59,7 @@ export class SpaceManager {
             [this.host.userId] : this.host.socket
         }
         this.userPositions = new Map();
+        this.proximityManager = new ProximityManager(this.participants, this.spaceId, this.COLLISION_DISTANCE);
         // Always assign color server-side (ignore any color from client)
         const assignedColor = generateRandomColor();
         this.playerList = [{ userId: this.host.userId, username: username, userColour : assignedColor }]
@@ -157,6 +160,9 @@ export class SpaceManager {
         // Assign a position that doesn't collide with existing users
         const initialPosition = this.findAvailablePosition();
         this.userPositions.set(message.userId, initialPosition);
+        
+        // Update proximity manager with latest participants
+        this.proximityManager.updateParticipants(this.participants);
         
         this.sendJoinSpaceEvents(socket, message.userId, false, assignedColor)
     }
@@ -260,6 +266,12 @@ export class SpaceManager {
         // Update position on server
         if (message.position && message.userId) {
             this.userPositions.set(message.userId, message.position);
+            
+            // Update proximity manager with latest participants
+            this.proximityManager.updateParticipants(this.participants);
+            
+            // Check if user is close to other users
+            this.proximityManager.checkUserProximity(this.userPositions);
         }
         
         // Find the moving user's color from playerList
@@ -286,6 +298,10 @@ export class SpaceManager {
         
         // Remove user position
         this.userPositions.delete(userId);
+        
+        // Update proximity manager and remove user from proximity
+        this.proximityManager.updateParticipants(this.participants);
+        this.proximityManager.removeUser(userId);
         
         // Broadcast updated player list to remaining players
         this.playerList.forEach(player => {
