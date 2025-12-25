@@ -315,4 +315,23 @@ export class SpaceManager {
         
         console.log(`[SpaceManager] User ${userId} left space ${this.spaceId}. Remaining players: ${this.playerList.length}`);
     }
+
+    handleWebRTCMessage(socket: WebSocket, message: any) {
+        // Find userId for this socket
+        let userId: string | null = null;
+        for (const [uid, sock] of Object.entries(this.participants)) {
+            if (sock === socket) {
+                userId = uid;
+                break;
+            }
+        }
+
+        if (!userId) {
+            console.warn(`[SpaceManager] Could not find userId for socket in WebRTC message`);
+            return;
+        }
+
+        // Route WebRTC message to proximity manager
+        this.proximityManager.handleWebRTCMessage(userId, message);
+    }
 }

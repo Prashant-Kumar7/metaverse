@@ -12,6 +12,7 @@ import { ArrowLeft, Send, Users } from "lucide-react";
 import { useWebSocket } from "@/contexts/WebSocketContext";
 import { useUser } from "@clerk/nextjs";
 import { toast } from "sonner";
+import { WebRTCVideoChatModal } from "@/components/WebRTCVideoChatModal";
 
 interface User {
   userId: string;
@@ -54,6 +55,7 @@ export default function SpacePage() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState<string>("");
   const [proximityInfo, setProximityInfo] = useState<{ roomId: string; userIds: string[] } | null>(null);
+  const [videoChatOpen, setVideoChatOpen] = useState(false);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const { sendMessage, addMessageListener, isConnected } = useWebSocket();
   const positionRef = useRef({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
@@ -347,6 +349,47 @@ export default function SpacePage() {
       }
     });
 
+    // Handle WebRTC connected message - open video chat modal
+    const offWebRTCConnected = addMessageListener("webrtc_connected", (message) => {
+      console.log("[WebRTC] Connected message:", message);
+      if (message.roomId && message.userIds && Array.isArray(message.userIds)) {
+        const otherUsers = message.userIds.filter((id: string) => id !== user?.id);
+        if (otherUsers.length > 0) {
+          setProximityInfo({
+            roomId: message.roomId,
+            userIds: otherUsers
+          });
+          // Open video chat modal
+          setVideoChatOpen(true);
+        }
+      }
+    });
+
+    // Handle WebRTC disconnected message
+    const offWebRTCDisconnected = addMessageListener("webrtc_disconnected", (message) => {
+      console.log("[WebRTC] Disconnected message:", message);
+      if (message.roomId && proximityInfo?.roomId === message.roomId) {
+        if (message.disconnectedUserId) {
+          // Update proximity info to remove disconnected user
+          setProximityInfo((prev) => {
+            if (prev) {
+              const updatedUserIds = prev.userIds.filter((id) => id !== message.disconnectedUserId);
+              if (updatedUserIds.length === 0) {
+                setVideoChatOpen(false);
+                return null;
+              }
+              return { ...prev, userIds: updatedUserIds };
+            }
+            return prev;
+          });
+        } else {
+          // All users disconnected or left proximity
+          setVideoChatOpen(false);
+          setProximityInfo(null);
+        }
+      }
+    });
+
     // Handle proximity left messages
     const offProximityLeft = addMessageListener("proximityLeft", (message) => {
       console.log("[PROXIMITY_LEFT] Received:", message);
@@ -358,6 +401,7 @@ export default function SpacePage() {
               description: "You have moved away from other users",
               duration: 2000,
             });
+            setVideoChatOpen(false);
             return null;
           }
           return prev;
@@ -385,6 +429,8 @@ export default function SpacePage() {
       offUserPositions();
       offProximityMessage();
       offProximityLeft();
+      offWebRTCConnected();
+      offWebRTCDisconnected();
       hasJoinedSpaceRef.current = false;
     };
   }, [isClient, spaceId, router, addMessageListener, sendMessage, isConnected, username, user?.id]);
@@ -747,7 +793,7 @@ export default function SpacePage() {
 
   return (
     <div 
-      className="relative overflow-hidden fixed inset-0"
+      className="overflow-hidden fixed inset-0"
       style={{ 
         width: "100vw", 
         height: "100vh",
@@ -877,6 +923,18 @@ export default function SpacePage() {
           )}
         </div>
       </div>
+
+      {/* WebRTC Video Chat Modal */}
+      {proximityInfo && user?.id && (
+        <WebRTCVideoChatModal
+          open={videoChatOpen}
+          onOpenChange={setVideoChatOpen}
+          roomId={proximityInfo.roomId}
+          userIds={[...proximityInfo.userIds, user.id]}
+          currentUserId={user.id}
+          spaceId={spaceId}
+        />
+      )}
 
       {/* Chat Section */}
       <div className="absolute bottom-4 right-4 z-10 w-80 bg-background/90 backdrop-blur-sm border-2 border-border rounded-lg shadow-lg flex flex-col max-h-96">

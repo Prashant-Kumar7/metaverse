@@ -50,6 +50,21 @@ export class ProximityManager {
         });
     }
 
+    private sendWebRTCConnected(room: ProximityRoom) {
+        const userIdsArray = Array.from(room.userIds);
+        
+        userIdsArray.forEach((userId) => {
+            const socket = this.participants[userId];
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    type: "webrtc_connected",
+                    roomId: room.roomId,
+                    userIds: userIdsArray
+                }));
+            }
+        });
+    }
+
     private sendProximityLeftMessage(room: ProximityRoom) {
         const userIdsArray = Array.from(room.userIds);
         
@@ -60,6 +75,21 @@ export class ProximityManager {
                     type: "PROXIMITY_LEFT",
                     roomId: room.roomId,
                     message: "You have left proximity with other users"
+                }));
+            }
+        });
+    }
+
+    private sendWebRTCDisconnected(room: ProximityRoom, disconnectedUserId?: string) {
+        const userIdsArray = Array.from(room.userIds);
+        
+        userIdsArray.forEach((userId) => {
+            const socket = this.participants[userId];
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({
+                    type: "webrtc_disconnected",
+                    roomId: room.roomId,
+                    disconnectedUserId: disconnectedUserId
                 }));
             }
         });
@@ -83,14 +113,18 @@ export class ProximityManager {
         // Send initial message immediately
         this.sendProximityMessage(room);
         
+        // Notify users to start WebRTC connections
+        this.sendWebRTCConnected(room);
+        
         return room;
     }
 
     private destroyProximityRoom(groupKey: string) {
         const room = this.proximityRooms.get(groupKey);
         if (room) {
-            // Notify all users that they've left proximity
+            // Notify all users that they've left proximity and to close WebRTC connections
             this.sendProximityLeftMessage(room);
+            this.sendWebRTCDisconnected(room);
             
             if (room.intervalId) {
                 clearInterval(room.intervalId);
@@ -137,6 +171,11 @@ export class ProximityManager {
                 
                 // Send updated message
                 this.sendProximityMessage(existingRoom);
+                
+                // If new users joined, notify to establish WebRTC connections
+                if (added.length > 0) {
+                    this.sendWebRTCConnected(existingRoom);
+                }
             }
         } else {
             // Create new room
@@ -264,6 +303,9 @@ export class ProximityManager {
         if (userRoomKey) {
             const room = this.proximityRooms.get(userRoomKey);
             if (room) {
+                // Notify other users that this user disconnected
+                this.sendWebRTCDisconnected(room, userId);
+                
                 room.userIds.delete(userId);
                 // If room has less than 2 users, destroy it
                 if (room.userIds.size < 2) {
@@ -301,6 +343,114 @@ export class ProximityManager {
 
     updateParticipants(participants: Participant) {
         this.participants = participants;
+    }
+
+    // WebRTC signaling handlers
+    handleWebRTCMessage(senderUserId: string, message: any): boolean {
+        // Find which proximity room the sender is in
+        const userRoomKey = this.userToProximityRoom.get(senderUserId);
+        if (!userRoomKey) {
+            console.warn(`[ProximityManager] User ${senderUserId} not in any proximity room for WebRTC message`);
+            return false;
+        }
+
+        const room = this.proximityRooms.get(userRoomKey);
+        if (!room) {
+            console.warn(`[ProximityManager] Proximity room ${userRoomKey} not found`);
+            return false;
+        }
+
+        // Verify sender is in this room
+        if (!room.userIds.has(senderUserId)) {
+            console.warn(`[ProximityManager] User ${senderUserId} not in room ${userRoomKey}`);
+            return false;
+        }
+
+        // Handle different WebRTC message types
+        switch (message.type) {
+            case "createOffer": {
+                // Relay offer to target user
+                const targetUserId = message.targetUserId;
+                if (!targetUserId || !room.userIds.has(targetUserId)) {
+                    console.warn(`[ProximityManager] Invalid target user ${targetUserId} for offer from ${senderUserId}`);
+                    return false;
+                }
+
+                const targetSocket = this.participants[targetUserId];
+                if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
+                    targetSocket.send(JSON.stringify({
+                        type: "createOffer",
+                        offer: message.offer,
+                        senderUserId: senderUserId,
+                        roomId: room.roomId
+                    }));
+                    console.log(`[ProximityManager] Relayed offer from ${senderUserId} to ${targetUserId}`);
+                }
+                return true;
+            }
+
+            case "createAnswer": {
+                // Relay answer to target user
+                const targetUserId = message.targetUserId;
+                if (!targetUserId || !room.userIds.has(targetUserId)) {
+                    console.warn(`[ProximityManager] Invalid target user ${targetUserId} for answer from ${senderUserId}`);
+                    return false;
+                }
+
+                const targetSocket = this.participants[targetUserId];
+                if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
+                    targetSocket.send(JSON.stringify({
+                        type: "createAnswer",
+                        answer: message.answer,
+                        senderUserId: senderUserId,
+                        roomId: room.roomId
+                    }));
+                    console.log(`[ProximityManager] Relayed answer from ${senderUserId} to ${targetUserId}`);
+                }
+                return true;
+            }
+
+            case "iceCandidate": {
+                // Relay ICE candidate to target user
+                const targetUserId = message.targetUserId;
+                if (!targetUserId || !room.userIds.has(targetUserId)) {
+                    console.warn(`[ProximityManager] Invalid target user ${targetUserId} for ICE candidate from ${senderUserId}`);
+                    return false;
+                }
+
+                const targetSocket = this.participants[targetUserId];
+                if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
+                    targetSocket.send(JSON.stringify({
+                        type: "iceCandidate",
+                        candidate: message.candidate,
+                        senderUserId: senderUserId,
+                        roomId: room.roomId
+                    }));
+                }
+                return true;
+            }
+
+            case "close_conn": {
+                // Notify target user that connection is closing
+                const targetUserId = message.targetUserId;
+                if (targetUserId && room.userIds.has(targetUserId)) {
+                    const targetSocket = this.participants[targetUserId];
+                    if (targetSocket && targetSocket.readyState === WebSocket.OPEN) {
+                        targetSocket.send(JSON.stringify({
+                            type: "close_conn",
+                            senderUserId: senderUserId,
+                            roomId: room.roomId
+                        }));
+                        console.log(`[ProximityManager] Relayed close_conn from ${senderUserId} to ${targetUserId}`);
+                    }
+                }
+                return true;
+            }
+
+            default:
+                console.warn(`[ProximityManager] Unknown WebRTC message type: ${message.type}`);
+                return false;
+        }
     }
 }
 

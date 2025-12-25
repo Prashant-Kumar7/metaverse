@@ -183,6 +183,20 @@ export class UserManager {
                     break;
                 }
 
+                case "createOffer":
+                case "createAnswer":
+                case "iceCandidate":
+                case "close_conn": {
+                    // WebRTC signaling messages - route to space's proximity manager
+                    const space = this.spaces.get(message.spaceId);
+                    if(space && space instanceof SpaceManager){
+                        space.handleWebRTCMessage(socket, message)
+                    } else {
+                        console.warn(`[UserManager] WebRTC message for unknown space: ${message.spaceId}`);
+                    }
+                    break;
+                }
+
                 default:
                     console.warn("Unhandled message type:", message.type);
                     break;
