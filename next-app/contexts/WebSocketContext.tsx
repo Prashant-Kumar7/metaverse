@@ -2,7 +2,10 @@
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from "react";
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8080";
+const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 
+  (process.env.NODE_ENV === 'production' 
+    ? "wss://metaverse-85dk.onrender.com" 
+    : "ws://localhost:8080");
 
 interface WebSocketContextType {
   sendMessage: (message: string) => void;
