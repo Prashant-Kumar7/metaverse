@@ -208,6 +208,33 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           return;
         }
 
+        if (type === 'PROXIMITY_MESSAGE') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'proximityMessage',
+            roomId: data.roomId,
+            message: data.message,
+            userIds: data.userIds || []
+          };
+          if (messageListeners.current.has('proximityMessage')) {
+            messageListeners.current.get('proximityMessage')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
+        }
+
+        if (type === 'PROXIMITY_LEFT') {
+          // Convert to frontend format
+          const frontendMessage = {
+            type: 'proximityLeft',
+            roomId: data.roomId,
+            message: data.message
+          };
+          if (messageListeners.current.has('proximityLeft')) {
+            messageListeners.current.get('proximityLeft')?.forEach(callback => callback(frontendMessage));
+          }
+          return;
+        }
+
         // console.log("WebSocket Message", data);
         if (type && typeof type === 'string' && messageListeners.current.has(type)) {
           messageListeners.current.get(type)?.forEach(callback => callback(data));

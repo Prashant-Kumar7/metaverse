@@ -8,9 +8,10 @@ import { getVisibleObjects, getCollidableObjects } from "@/lib/world/worldObject
 import { checkUserObjectCollision } from "@/lib/world/WorldObject";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ArrowLeft, Send } from "lucide-react";
+import { ArrowLeft, Send, Users } from "lucide-react";
 import { useWebSocket } from "@/contexts/WebSocketContext";
 import { useUser } from "@clerk/nextjs";
+import { toast } from "sonner";
 
 interface User {
   userId: string;
@@ -52,6 +53,7 @@ export default function SpacePage() {
   const [username, setUsername] = useState<string>("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState<string>("");
+  const [proximityInfo, setProximityInfo] = useState<{ roomId: string; userIds: string[] } | null>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const { sendMessage, addMessageListener, isConnected } = useWebSocket();
   const positionRef = useRef({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
@@ -70,6 +72,7 @@ export default function SpacePage() {
   // Smooth interpolation for other users' movement
   const userInterpolationsRef = useRef<Map<string, UserInterpolation>>(new Map());
   const interpolationAnimationRef = useRef<number | null>(null);
+  const lastProximityGroupRef = useRef<string>(""); // Track last proximity group to avoid spam
 
   // Set client-side flag and initialize viewport size after mount
   useEffect(() => {
@@ -313,6 +316,56 @@ export default function SpacePage() {
       });
     });
 
+    // Handle proximity messages
+    const offProximityMessage = addMessageListener("proximityMessage", (message) => {
+      console.log("[PROXIMITY_MESSAGE] Received:", message);
+      if (message.roomId && message.userIds && Array.isArray(message.userIds)) {
+        // Filter out current user from the list
+        const otherUsers = message.userIds.filter((id: string) => id !== user?.id);
+        
+        if (otherUsers.length > 0) {
+          // Create a unique key for this proximity group
+          const groupKey = otherUsers.sort().join('-');
+          
+          setProximityInfo({
+            roomId: message.roomId,
+            userIds: otherUsers
+          });
+          
+          // Only show toast when the group composition changes
+          if (lastProximityGroupRef.current !== groupKey) {
+            lastProximityGroupRef.current = groupKey;
+            toast.info("Users nearby", {
+              description: `You are in proximity with ${otherUsers.length} user(s)`,
+              duration: 3000,
+            });
+          }
+        } else {
+          setProximityInfo(null);
+          lastProximityGroupRef.current = "";
+        }
+      }
+    });
+
+    // Handle proximity left messages
+    const offProximityLeft = addMessageListener("proximityLeft", (message) => {
+      console.log("[PROXIMITY_LEFT] Received:", message);
+      if (message.roomId) {
+        // Clear proximity info if it matches the room we left
+        setProximityInfo((prev) => {
+          if (prev && prev.roomId === message.roomId) {
+            toast.info("Left proximity", {
+              description: "You have moved away from other users",
+              duration: 2000,
+            });
+            return null;
+          }
+          return prev;
+        });
+        lastProximityGroupRef.current = "";
+      }
+    });
+
     return () => {
       // Send leave message when component unmounts
       if (isConnected && spaceId && user?.id && hasJoinedSpaceRef.current) {
@@ -330,6 +383,8 @@ export default function SpacePage() {
       offChat();
       offJoinSpaceError();
       offUserPositions();
+      offProximityMessage();
+      offProximityLeft();
       hasJoinedSpaceRef.current = false;
     };
   }, [isClient, spaceId, router, addMessageListener, sendMessage, isConnected, username, user?.id]);
@@ -769,19 +824,19 @@ export default function SpacePage() {
         )}
         {/* Other users - current user should NOT be in users map */}
         {Array.from(users.values()).map((user) => (
-            <div
-              key={user.userId}
-              className="absolute rounded-full border-2 border-black dark:border-white"
-              style={{
-                left: user.position.x,
-                top: user.position.y,
-                width: USER_RADIUS * 2,
-                height: USER_RADIUS * 2,
-                backgroundColor: user.color,
-                transform: "translate(-50%, -50%)",
-              }}
-            />
-          ))}
+          <div
+            key={user.userId}
+            className="absolute rounded-full border-2 border-black dark:border-white"
+            style={{
+              left: user.position.x,
+              top: user.position.y,
+              width: USER_RADIUS * 2,
+              height: USER_RADIUS * 2,
+              backgroundColor: user.color,
+              transform: "translate(-50%, -50%)",
+            }}
+          />
+        ))}
       </div>
       
       {/* UI Overlay */}
@@ -807,6 +862,19 @@ export default function SpacePage() {
           <p className="text-xs text-foreground/70 mt-1">
             Users online: {users.size}
           </p>
+          {proximityInfo && proximityInfo.userIds.length > 0 && (
+            <div className="mt-2 pt-2 border-t border-border">
+              <div className="flex items-center gap-2 text-xs text-foreground/80">
+                <Users className="size-3 text-primary" />
+                <span className="font-semibold text-primary">
+                  Near {proximityInfo.userIds.length} user{proximityInfo.userIds.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+              <p className="text-xs text-foreground/60 mt-1 font-mono">
+                Room: {proximityInfo.roomId.slice(0, 20)}...
+              </p>
+            </div>
+          )}
         </div>
       </div>
 
