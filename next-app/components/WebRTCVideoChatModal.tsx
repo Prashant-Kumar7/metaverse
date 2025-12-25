@@ -201,22 +201,25 @@ export function WebRTCVideoChatModal({
     const initializeConnections = () => {
       if (!isMounted || !localStreamRef.current) return;
 
-      // Create peer connections for all users in proximity
-      // The onnegotiationneeded event will trigger offer creation (only for lower userId)
+      // Create peer connections for ALL users in proximity (both users should have their own PC)
+      // This ensures full duplex communication - each user has their own peer connection
       userIds.forEach((targetUserId) => {
         if (targetUserId !== currentUserId && !peerConnectionsRef.current.has(targetUserId)) {
-          console.log(`[WebRTC] Creating peer connection for ${targetUserId}`);
+          console.log(`[WebRTC] Creating peer connection for ${targetUserId} (ensuring bidirectional connection)`);
           const pc = createPeerConnection(targetUserId);
-          // onnegotiationneeded will fire automatically after addTrack
-          // Only the user with lower userId will create the offer
-          // The other user will wait to receive the offer
           
-          // Explicitly create offer if we should initiate (in case onnegotiationneeded doesn't fire)
+          // Verify tracks are added
+          const senders = pc.getSenders();
+          console.log(`[WebRTC] Peer connection for ${targetUserId} has ${senders.length} senders (tracks)`);
+          console.log(`[WebRTC] Total peer connections: ${peerConnectionsRef.current.size} (should be ${userIds.length - 1} for full duplex)`);
+          
+          // Only the user with lower userId creates the offer
+          // The user with higher userId will wait to receive the offer
           if (currentUserId < targetUserId && localStreamRef.current) {
             // Wait a bit for tracks to be added, then create offer if still needed
             setTimeout(() => {
               if (pc.signalingState === "stable" && !pc.localDescription) {
-                console.log(`[WebRTC] Explicitly creating offer for ${targetUserId} (backup)`);
+                console.log(`[WebRTC] Explicitly creating offer for ${targetUserId} (we have lower ID)`);
                 pc.createOffer()
                   .then((offer) => {
                     return pc.setLocalDescription(offer);
@@ -239,6 +242,8 @@ export function WebRTCVideoChatModal({
                   });
               }
             }, 100);
+          } else if (currentUserId >= targetUserId) {
+            console.log(`[WebRTC] Peer connection created for ${targetUserId}, waiting for their offer (they have lower ID)`);
           }
         }
       });
@@ -318,8 +323,16 @@ export function WebRTCVideoChatModal({
         let pc = peerConnectionsRef.current.get(senderUserId);
 
         if (!pc) {
-          console.log(`[WebRTC] Creating new peer connection for ${senderUserId}`);
+          console.log(`[WebRTC] Creating new peer connection for ${senderUserId} (received offer)`);
           pc = createPeerConnection(senderUserId);
+          
+          // Ensure local tracks are added (they should be added in createPeerConnection, but double-check)
+          if (localStreamRef.current && pc.getSenders().length === 0) {
+            console.log(`[WebRTC] Adding local tracks to peer connection for ${senderUserId}`);
+            localStreamRef.current.getTracks().forEach((track) => {
+              pc.addTrack(track, localStreamRef.current!);
+            });
+          }
         }
 
         if (!message.offer) {
@@ -346,10 +359,21 @@ export function WebRTCVideoChatModal({
             }
             iceCandidateQueueRef.current.delete(senderUserId);
             
-            console.log(`[WebRTC] Creating answer for ${senderUserId}`);
+            // Verify we have local tracks before creating answer
+            const sendersBeforeAnswer = pc.getSenders();
+            console.log(`[WebRTC] Creating answer for ${senderUserId} (has ${sendersBeforeAnswer.length} senders/tracks)`);
+            
+            // Ensure we have local tracks (should already be added in createPeerConnection, but double-check)
+            if (sendersBeforeAnswer.length === 0 && localStreamRef.current) {
+              console.log(`[WebRTC] No senders found, adding local tracks before creating answer`);
+              localStreamRef.current.getTracks().forEach((track) => {
+                pc.addTrack(track, localStreamRef.current!);
+              });
+            }
+            
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
-            console.log(`[WebRTC] Answer created and local description set for ${senderUserId}`);
+            console.log(`[WebRTC] Answer created and local description set for ${senderUserId} (now has ${pc.getSenders().length} senders)`);
 
             // Add any pending ICE candidates after setting local description
             const remainingCandidates = iceCandidateQueueRef.current.get(senderUserId) || [];
