@@ -75,7 +75,7 @@ export function WebRTCVideoChatModal({
     }
   }, [localStream]);
 
-  // Create peer connection for a specific user
+  // Create peer connection for a specific user (without tracks - tracks added later)
   const createPeerConnection = useCallback((targetUserId: string) => {
     const pc = new RTCPeerConnection({
       iceServers: [
@@ -83,15 +83,6 @@ export function WebRTCVideoChatModal({
         { urls: "stun:stun1.l.google.com:19302" },
       ],
     });
-
-    // Add local tracks to peer connection (must be done after stream is ready)
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        if (localStreamRef.current) {
-          pc.addTrack(track, localStreamRef.current);
-        }
-      });
-    }
 
     // Handle ICE candidates
     pc.onicecandidate = (event) => {
@@ -108,6 +99,7 @@ export function WebRTCVideoChatModal({
     };
 
     // Use onnegotiationneeded to create offer - only if we should initiate (lower userId creates offer)
+    // This will fire when tracks are added (like the reference code)
     pc.onnegotiationneeded = () => {
       console.log(`[WebRTC] onnegotiationneeded triggered for ${targetUserId}`);
       // Only create offer if current user's ID is less than target user's ID (deterministic)
@@ -176,6 +168,16 @@ export function WebRTCVideoChatModal({
     };
 
     peerConnectionsRef.current.set(targetUserId, pc);
+    
+    // Add local tracks AFTER peer connection is created (like reference code)
+    // This triggers onnegotiationneeded
+    if (localStreamRef.current) {
+      console.log(`[WebRTC] Adding local tracks to peer connection for ${targetUserId}`);
+      localStreamRef.current.getTracks().forEach((track) => {
+        pc.addTrack(track, localStreamRef.current!);
+      });
+    }
+    
     return pc;
   }, [spaceId, sendMessage, currentUserId]);
 
@@ -203,48 +205,17 @@ export function WebRTCVideoChatModal({
 
       // Create peer connections for ALL users in proximity (both users should have their own PC)
       // This ensures full duplex communication - each user has their own peer connection
+      // Like the reference code: create PC first, then add tracks (which triggers onnegotiationneeded)
       userIds.forEach((targetUserId) => {
         if (targetUserId !== currentUserId && !peerConnectionsRef.current.has(targetUserId)) {
-          console.log(`[WebRTC] Creating peer connection for ${targetUserId} (ensuring bidirectional connection)`);
+          console.log(`[WebRTC] Creating peer connection for ${targetUserId}`);
           const pc = createPeerConnection(targetUserId);
           
-          // Verify tracks are added
+          // Verify tracks are added (they're added in createPeerConnection)
           const senders = pc.getSenders();
           console.log(`[WebRTC] Peer connection for ${targetUserId} has ${senders.length} senders (tracks)`);
           console.log(`[WebRTC] Total peer connections: ${peerConnectionsRef.current.size} (should be ${userIds.length - 1} for full duplex)`);
-          
-          // Only the user with lower userId creates the offer
-          // The user with higher userId will wait to receive the offer
-          if (currentUserId < targetUserId && localStreamRef.current) {
-            // Wait a bit for tracks to be added, then create offer if still needed
-            setTimeout(() => {
-              if (pc.signalingState === "stable" && !pc.localDescription) {
-                console.log(`[WebRTC] Explicitly creating offer for ${targetUserId} (we have lower ID)`);
-                pc.createOffer()
-                  .then((offer) => {
-                    return pc.setLocalDescription(offer);
-                  })
-                  .then(() => {
-                    if (pc.localDescription) {
-                      sendMessage(
-                        JSON.stringify({
-                          type: "createOffer",
-                          spaceId: spaceId,
-                          targetUserId: targetUserId,
-                          offer: pc.localDescription,
-                        })
-                      );
-                      console.log(`[WebRTC] Explicit offer sent to ${targetUserId}`);
-                    }
-                  })
-                  .catch((error) => {
-                    console.error(`[WebRTC] Error creating explicit offer for ${targetUserId}:`, error);
-                  });
-              }
-            }, 100);
-          } else if (currentUserId >= targetUserId) {
-            console.log(`[WebRTC] Peer connection created for ${targetUserId}, waiting for their offer (they have lower ID)`);
-          }
+          // onnegotiationneeded will fire automatically when tracks are added
         }
       });
     };
@@ -263,35 +234,16 @@ export function WebRTCVideoChatModal({
     const offWebRTCConnected = addMessageListener("webrtc_connected", (message) => {
       console.log("[WebRTC] Connected message:", message);
       if (message.roomId === roomId) {
-        // Re-initialize connections if needed
+        // Create peer connections for all other users (like reference code's gotConnected)
+        // Both users should create their own peer connections
         const newUserIds = message.userIds.filter((id: string) => id !== currentUserId);
         newUserIds.forEach((targetUserId: string) => {
           if (!peerConnectionsRef.current.has(targetUserId)) {
+            console.log(`[WebRTC] Creating peer connection for ${targetUserId} (webrtc_connected)`);
             const pc = createPeerConnection(targetUserId);
-            // Only create offer if current user has lower userId (deterministic)
-            // Otherwise wait for the other user to create the offer
-            if (currentUserId < targetUserId) {
-              console.log(`[WebRTC] Creating explicit offer for ${targetUserId} (we have lower ID)`);
-              pc.createOffer()
-                .then((offer) => {
-                  return pc.setLocalDescription(offer).then(() => offer);
-                })
-                .then((offer) => {
-                  sendMessage(
-                    JSON.stringify({
-                      type: "createOffer",
-                      spaceId: spaceId,
-                      targetUserId: targetUserId,
-                      offer: offer,
-                    })
-                  );
-                })
-                .catch((error) => {
-                  console.error(`[WebRTC] Error creating offer for ${targetUserId} in webrtc_connected:`, error);
-                });
-            } else {
-              console.log(`[WebRTC] Waiting for offer from ${targetUserId} (they have lower ID)`);
-            }
+            // Tracks are added in createPeerConnection, which triggers onnegotiationneeded
+            // Only the user with lower ID will create the offer via onnegotiationneeded
+            console.log(`[WebRTC] Peer connection created for ${targetUserId}, onnegotiationneeded will handle offer creation`);
           }
         });
       }
@@ -325,14 +277,7 @@ export function WebRTCVideoChatModal({
         if (!pc) {
           console.log(`[WebRTC] Creating new peer connection for ${senderUserId} (received offer)`);
           pc = createPeerConnection(senderUserId);
-        }
-        
-        // Ensure local tracks are added (they should be added in createPeerConnection, but double-check)
-        if (pc && localStreamRef.current && pc.getSenders().length === 0) {
-          console.log(`[WebRTC] Adding local tracks to peer connection for ${senderUserId}`);
-          localStreamRef.current.getTracks().forEach((track) => {
-            pc!.addTrack(track, localStreamRef.current!);
-          });
+          // Tracks are automatically added in createPeerConnection
         }
 
         if (!pc) {
