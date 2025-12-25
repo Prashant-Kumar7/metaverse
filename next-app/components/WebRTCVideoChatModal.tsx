@@ -325,14 +325,19 @@ export function WebRTCVideoChatModal({
         if (!pc) {
           console.log(`[WebRTC] Creating new peer connection for ${senderUserId} (received offer)`);
           pc = createPeerConnection(senderUserId);
-          
-          // Ensure local tracks are added (they should be added in createPeerConnection, but double-check)
-          if (localStreamRef.current && pc.getSenders().length === 0) {
-            console.log(`[WebRTC] Adding local tracks to peer connection for ${senderUserId}`);
-            localStreamRef.current.getTracks().forEach((track) => {
-              pc.addTrack(track, localStreamRef.current!);
-            });
-          }
+        }
+        
+        // Ensure local tracks are added (they should be added in createPeerConnection, but double-check)
+        if (pc && localStreamRef.current && pc.getSenders().length === 0) {
+          console.log(`[WebRTC] Adding local tracks to peer connection for ${senderUserId}`);
+          localStreamRef.current.getTracks().forEach((track) => {
+            pc!.addTrack(track, localStreamRef.current!);
+          });
+        }
+
+        if (!pc) {
+          console.error(`[WebRTC] Failed to create peer connection for ${senderUserId}`);
+          return;
         }
 
         if (!message.offer) {
