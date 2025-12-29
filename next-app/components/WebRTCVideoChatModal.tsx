@@ -45,6 +45,7 @@ export function WebRTCVideoChatModal({
   const remoteDescriptionSetRef = useRef<Map<string, boolean>>(new Map());
   const remoteStreamsSetRef = useRef<Map<string, MediaStream>>(new Map());
   const offerCreationInProgressRef = useRef<Set<string>>(new Set());
+  const userIdsRef = useRef<string[]>(userIds);
 
   // Initialize local video stream
   const initializeLocalStream = useCallback(async () => {
@@ -220,6 +221,11 @@ export function WebRTCVideoChatModal({
       // Don't stop stream here - let cleanup effect handle it
     };
   }, [open, initializeLocalStream]);
+
+  // Keep userIdsRef in sync with userIds prop
+  useEffect(() => {
+    userIdsRef.current = userIds;
+  }, [userIds]);
 
   // Initialize WebRTC connections when users enter proximity and stream is ready
   useEffect(() => {
@@ -440,9 +446,11 @@ export function WebRTCVideoChatModal({
             
             // After handling an offer, check if we need to create offers to other users
             // This ensures that even if we received an offer first, we still create offers to users we should connect to
-            setTimeout(() => {
-              if (userIds && userIds.length > 0) {
-                const otherUserIds = userIds.filter(id => id !== currentUserId && id !== senderUserId);
+            // Use queueMicrotask to avoid React render cycle issues
+            queueMicrotask(() => {
+              const currentUserIds = userIdsRef.current;
+              if (currentUserIds && currentUserIds.length > 0) {
+                const otherUserIds = currentUserIds.filter(id => id !== currentUserId && id !== senderUserId);
                 otherUserIds.forEach((targetUserId: string) => {
                   const targetPc = peerConnectionsRef.current.get(targetUserId);
                   if (targetPc && 
@@ -480,7 +488,7 @@ export function WebRTCVideoChatModal({
                   }
                 });
               }
-            }, 100); // Small delay to ensure state is updated
+            });
           } else {
             console.warn(`[WebRTC] Skipping duplicate offer from ${senderUserId}, signaling state: ${pc.signalingState}`);
           }
@@ -538,9 +546,11 @@ export function WebRTCVideoChatModal({
             
             // After handling an answer, check if we need to create offers to other users
             // This ensures that even after completing a connection, we still create offers to users we should connect to
-            setTimeout(() => {
-              if (userIds && userIds.length > 0) {
-                const otherUserIds = userIds.filter(id => id !== currentUserId && id !== senderUserId);
+            // Use queueMicrotask to avoid React render cycle issues
+            queueMicrotask(() => {
+              const currentUserIds = userIdsRef.current;
+              if (currentUserIds && currentUserIds.length > 0) {
+                const otherUserIds = currentUserIds.filter(id => id !== currentUserId && id !== senderUserId);
                 otherUserIds.forEach((targetUserId: string) => {
                   const targetPc = peerConnectionsRef.current.get(targetUserId);
                   if (targetPc && 
@@ -578,7 +588,7 @@ export function WebRTCVideoChatModal({
                   }
                 });
               }
-            }, 100); // Small delay to ensure state is updated
+            });
           } else {
             console.warn(`[WebRTC] Skipping answer from ${senderUserId}, signaling state is ${pc.signalingState} (expected have-local-offer or have-remote-offer)`);
           }
