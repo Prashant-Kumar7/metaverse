@@ -45,7 +45,6 @@ export function WebRTCVideoChatModal({
   const remoteDescriptionSetRef = useRef<Map<string, boolean>>(new Map());
   const remoteStreamsSetRef = useRef<Map<string, MediaStream>>(new Map());
   const offerCreationInProgressRef = useRef<Set<string>>(new Set());
-  const userIdsRef = useRef<string[]>(userIds);
 
   // Initialize local video stream
   const initializeLocalStream = useCallback(async () => {
@@ -221,11 +220,6 @@ export function WebRTCVideoChatModal({
       // Don't stop stream here - let cleanup effect handle it
     };
   }, [open, initializeLocalStream]);
-
-  // Keep userIdsRef in sync with userIds prop
-  useEffect(() => {
-    userIdsRef.current = userIds;
-  }, [userIds]);
 
   // Initialize WebRTC connections when users enter proximity and stream is ready
   useEffect(() => {
@@ -443,52 +437,6 @@ export function WebRTCVideoChatModal({
             };
             console.log(`[WebRTC] Sending answer to ${senderUserId}`);
             sendMessage(JSON.stringify(answerMessage));
-            
-            // After handling an offer, check if we need to create offers to other users
-            // This ensures that even if we received an offer first, we still create offers to users we should connect to
-            // Use queueMicrotask to avoid React render cycle issues
-            queueMicrotask(() => {
-              const currentUserIds = userIdsRef.current;
-              if (currentUserIds && currentUserIds.length > 0) {
-                const otherUserIds = currentUserIds.filter(id => id !== currentUserId && id !== senderUserId);
-                otherUserIds.forEach((targetUserId: string) => {
-                  const targetPc = peerConnectionsRef.current.get(targetUserId);
-                  if (targetPc && 
-                      targetPc.signalingState === "stable" && 
-                      !targetPc.localDescription && 
-                      !offerCreationInProgressRef.current.has(targetUserId) &&
-                      currentUserId < targetUserId) {
-                    console.log(`[WebRTC] Creating offer to ${targetUserId} after handling offer from ${senderUserId}`);
-                    offerCreationInProgressRef.current.add(targetUserId);
-                    targetPc.createOffer()
-                      .then((offer) => {
-                        if (targetPc.signalingState === "stable" && !targetPc.localDescription) {
-                          return targetPc.setLocalDescription(offer);
-                        }
-                        return Promise.resolve();
-                      })
-                      .then(() => {
-                        if (targetPc.localDescription) {
-                          sendMessage(
-                            JSON.stringify({
-                              type: "createOffer",
-                              spaceId: spaceId,
-                              targetUserId: targetUserId,
-                              offer: targetPc.localDescription,
-                            })
-                          );
-                          console.log(`[WebRTC] Offer sent to ${targetUserId} (after handling offer)`);
-                        }
-                        offerCreationInProgressRef.current.delete(targetUserId);
-                      })
-                      .catch((error) => {
-                        console.error(`[WebRTC] Error creating offer to ${targetUserId}:`, error);
-                        offerCreationInProgressRef.current.delete(targetUserId);
-                      });
-                  }
-                });
-              }
-            });
           } else {
             console.warn(`[WebRTC] Skipping duplicate offer from ${senderUserId}, signaling state: ${pc.signalingState}`);
           }
@@ -521,10 +469,9 @@ export function WebRTCVideoChatModal({
         }
 
         try {
-          // Check signaling state - should be "have-local-offer" when we receive an answer
-          // We can also accept if state is "have-remote-offer" (in case of race condition)
-          if (pc.signalingState === "have-local-offer" || pc.signalingState === "have-remote-offer") {
-            console.log(`[WebRTC] Setting remote description (answer) from ${senderUserId}, current state: ${pc.signalingState}`);
+          // Check signaling state before setting (like working code)
+          if (pc.signalingState !== "stable") {
+            console.log(`[WebRTC] Setting remote description (answer) from ${senderUserId}`);
             await pc.setRemoteDescription(new RTCSessionDescription(message.answer));
             remoteDescriptionSetRef.current.set(senderUserId, true);
             
@@ -542,55 +489,9 @@ export function WebRTCVideoChatModal({
               }
             }
             iceCandidateQueueRef.current.delete(senderUserId);
-            console.log(`[WebRTC] Successfully set remote description and processed candidates for ${senderUserId}, new state: ${pc.signalingState}`);
-            
-            // After handling an answer, check if we need to create offers to other users
-            // This ensures that even after completing a connection, we still create offers to users we should connect to
-            // Use queueMicrotask to avoid React render cycle issues
-            queueMicrotask(() => {
-              const currentUserIds = userIdsRef.current;
-              if (currentUserIds && currentUserIds.length > 0) {
-                const otherUserIds = currentUserIds.filter(id => id !== currentUserId && id !== senderUserId);
-                otherUserIds.forEach((targetUserId: string) => {
-                  const targetPc = peerConnectionsRef.current.get(targetUserId);
-                  if (targetPc && 
-                      targetPc.signalingState === "stable" && 
-                      !targetPc.localDescription && 
-                      !offerCreationInProgressRef.current.has(targetUserId) &&
-                      currentUserId < targetUserId) {
-                    console.log(`[WebRTC] Creating offer to ${targetUserId} after handling answer from ${senderUserId}`);
-                    offerCreationInProgressRef.current.add(targetUserId);
-                    targetPc.createOffer()
-                      .then((offer) => {
-                        if (targetPc.signalingState === "stable" && !targetPc.localDescription) {
-                          return targetPc.setLocalDescription(offer);
-                        }
-                        return Promise.resolve();
-                      })
-                      .then(() => {
-                        if (targetPc.localDescription) {
-                          sendMessage(
-                            JSON.stringify({
-                              type: "createOffer",
-                              spaceId: spaceId,
-                              targetUserId: targetUserId,
-                              offer: targetPc.localDescription,
-                            })
-                          );
-                          console.log(`[WebRTC] Offer sent to ${targetUserId} (after handling answer)`);
-                        }
-                        offerCreationInProgressRef.current.delete(targetUserId);
-                      })
-                      .catch((error) => {
-                        console.error(`[WebRTC] Error creating offer to ${targetUserId}:`, error);
-                        offerCreationInProgressRef.current.delete(targetUserId);
-                      });
-                  }
-                });
-              }
-            });
+            console.log(`[WebRTC] Successfully set remote description and processed candidates for ${senderUserId}`);
           } else {
-            console.warn(`[WebRTC] Skipping answer from ${senderUserId}, signaling state is ${pc.signalingState} (expected have-local-offer or have-remote-offer)`);
+            console.warn(`[WebRTC] Skipping duplicate answer from ${senderUserId}, signaling state: ${pc.signalingState}`);
           }
         } catch (error) {
           console.error(`[WebRTC] Error handling answer from ${senderUserId}:`, error);
@@ -663,7 +564,7 @@ export function WebRTCVideoChatModal({
       offIceCandidate();
       offCloseConn();
     };
-  }, [open, roomId, spaceId, currentUserId, createPeerConnection, sendMessage, addMessageListener, userIds]);
+  }, [open, roomId, spaceId, currentUserId, createPeerConnection, sendMessage, addMessageListener]);
 
   // Cleanup on close
   useEffect(() => {
