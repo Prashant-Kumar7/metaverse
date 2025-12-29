@@ -243,17 +243,64 @@ export function WebRTCVideoChatModal({
 
     const offWebRTCConnected = addMessageListener("webrtc_connected", (message) => {
       console.log("[WebRTC] Connected message:", message);
-      if (message.roomId === roomId) {
+      if (message.roomId === roomId && message.userIds && Array.isArray(message.userIds)) {
         // Create peer connections for all other users (like reference code's gotConnected)
-        // Both users should create their own peer connections
+        // This handles both initial connection and when new users join
         const newUserIds = message.userIds.filter((id: string) => id !== currentUserId);
+        console.log(`[WebRTC] webrtc_connected: Need to create connections for ${newUserIds.length} users:`, newUserIds);
+        console.log(`[WebRTC] Current peer connections:`, Array.from(peerConnectionsRef.current.keys()));
+        
+        // IMPORTANT: Create peer connections for ALL users in the message, even if some already exist
+        // This ensures that when a new user joins, existing users create connections to them
         newUserIds.forEach((targetUserId: string) => {
           if (!peerConnectionsRef.current.has(targetUserId)) {
-            console.log(`[WebRTC] Creating peer connection for ${targetUserId} (webrtc_connected)`);
+            console.log(`[WebRTC] Creating NEW peer connection for ${targetUserId} (webrtc_connected)`);
             const pc = createPeerConnection(targetUserId);
             // Tracks are added in createPeerConnection, which triggers onnegotiationneeded
             // Only the user with lower ID will create the offer via onnegotiationneeded
             console.log(`[WebRTC] Peer connection created for ${targetUserId}, onnegotiationneeded will handle offer creation`);
+          } else {
+            console.log(`[WebRTC] Peer connection for ${targetUserId} already exists (webrtc_connected)`);
+            // Even if connection exists, ensure it's properly set up
+            const pc = peerConnectionsRef.current.get(targetUserId);
+            if (pc) {
+              // Check if we have local tracks
+              const senders = pc.getSenders();
+              if (senders.length === 0 && localStreamRef.current) {
+                console.log(`[WebRTC] Adding missing local tracks to existing peer connection for ${targetUserId}`);
+                localStreamRef.current.getTracks().forEach((track) => {
+                  pc.addTrack(track, localStreamRef.current!);
+                });
+              }
+              // Check if we need to create an offer (in case connection was created but offer wasn't sent)
+              // This is important when a new user joins - existing users might need to create offers to the new user
+              if (pc.signalingState === "stable" && !pc.localDescription && currentUserId < targetUserId) {
+                console.log(`[WebRTC] Connection exists but no offer sent yet for ${targetUserId}, creating offer now`);
+                pc.createOffer()
+                  .then((offer) => {
+                    if (pc.signalingState === "stable" && !pc.localDescription) {
+                      return pc.setLocalDescription(offer);
+                    }
+                    return Promise.resolve();
+                  })
+                  .then(() => {
+                    if (pc.localDescription) {
+                      sendMessage(
+                        JSON.stringify({
+                          type: "createOffer",
+                          spaceId: spaceId,
+                          targetUserId: targetUserId,
+                          offer: pc.localDescription,
+                        })
+                      );
+                      console.log(`[WebRTC] Offer sent to ${targetUserId} (late offer)`);
+                    }
+                  })
+                  .catch((error) => {
+                    console.error(`[WebRTC] Error creating late offer for ${targetUserId}:`, error);
+                  });
+              }
+            }
           }
         });
       }
