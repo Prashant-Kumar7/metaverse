@@ -386,7 +386,7 @@ export default function DashboardPage() {
               </Card>
 
               {/* Quick Join Card */}
-              <Card className="flex flex-col border-2 border-primary/20 bg-gradient-to-br from-primary/5 to-background">
+              <Card className="flex flex-col border-2 border-primary/20 bg-linear-to-br from-primary/5 to-background">
                 <CardHeader>
                   <div className="flex items-center gap-2">
                     <Zap className="size-5 text-primary" />
